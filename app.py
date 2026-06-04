@@ -24,6 +24,38 @@ def clean_note_text(notes_text):
     cleaned = re.sub(r'\s+', ' ', cleaned).strip()
     return cleaned
 
+
+def format_tasks_for_table(task_list):
+    """Formats tasks as bullet points for the Work Completed table"""
+    if not task_list:
+        return "- No tasks completed today"
+    
+    lines = []
+    for t in task_list:
+        note = clean_note_text(t.get("notes", ""))
+        line = f"- **{t['name']}** ({t['assignee']})"
+        if note:
+            line += f"<br>  - {note}"
+        lines.append(line)
+    return "<br>".join(lines)
+
+
+def format_task_list(task_list):
+    """Formats tasks as a simple bullet list"""
+    if not task_list:
+        return "- None"
+    
+    lines = []
+    for t in task_list:
+        note = clean_note_text(t.get("notes", ""))
+        line = f"- **{t['name']}** ({t['assignee']})"
+        if note:
+            line += f" — {note}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+
 # ===================== PAGE CONFIG =====================
 st.set_page_config(page_title="Team Task Tracker", layout="wide", page_icon="🚀")
 
