@@ -156,23 +156,43 @@ st.subheader("🛠️ Manage Tasks")
 
 col_update, col_remove = st.columns(2)
 
-# --- Update Task ---
+# ===================== UPDATE TASK (with Reassign) =====================
 with col_update:
     with st.container(border=True):
-        st.markdown("#### ✏️ Update Task Progress")
-        
+        st.markdown("#### ✏️ Update Task")
+
         if tasks:
             task_options = {f"#{t['id']} - {t['name']} ({t['assignee']})": t['id'] for t in tasks}
             selected_label = st.selectbox("Select task", list(task_options.keys()), key="update_select")
             selected_id = task_options[selected_label]
             task = next(t for t in tasks if t["id"] == selected_id)
 
-            new_status = st.selectbox("New Status", statuses, 
-                                      index=statuses.index(task["status"]), key="new_status")
-            new_note = st.text_area("Add note (optional)", value="", height=100, key="new_note")
+            # Status
+            new_status = st.selectbox(
+                "New Status", 
+                statuses, 
+                index=statuses.index(task["status"]), 
+                key="new_status"
+            )
+
+            # Reassign
+            new_assignee = st.text_input(
+                "Reassign To", 
+                value=task["assignee"],
+                key="new_assignee"
+            )
+
+            # Note
+            new_note = st.text_area(
+                "Add note (optional)", 
+                value="", 
+                height=100, 
+                key="new_note"
+            )
 
             if st.button("Update Task", type="primary", use_container_width=True):
                 task["status"] = new_status
+                task["assignee"] = new_assignee.strip() or "Unassigned"
                 if new_note.strip():
                     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
                     task["notes"] = (task.get("notes", "") + f"\n[{timestamp}] {new_note.strip()}").strip()
@@ -183,11 +203,11 @@ with col_update:
         else:
             st.info("No tasks available to update.")
 
-# --- Remove Tasks ---
+# ===================== REMOVE TASKS =====================
 with col_remove:
     with st.container(border=True):
         st.markdown("#### 🗑️ Remove Tasks")
-        
+
         if tasks:
             task_labels = {
                 f"#{t['id']} - {t['name']} ({t['assignee']}) [{t['status']}]": t['id'] 
@@ -205,7 +225,7 @@ with col_remove:
                     f"Confirm removal of {len(selected_to_remove)} task(s)", 
                     key="confirm_remove"
                 )
-                
+
                 if st.button("Remove Selected", disabled=not confirm, type="secondary", use_container_width=True):
                     ids_to_remove = [task_labels[label] for label in selected_to_remove]
                     tasks = [t for t in tasks if t["id"] not in ids_to_remove]
@@ -215,7 +235,7 @@ with col_remove:
         else:
             st.info("No tasks to remove.")
 
-# ===================== DEBUG / NOTES SECTION =====================
+# ===================== FULL NOTES EXPANDER =====================
 with st.expander("📜 Show Full Original Notes (with timestamps)"):
     if tasks:
         for t in tasks:
