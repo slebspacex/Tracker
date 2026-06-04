@@ -7,6 +7,9 @@ import re
 
 TASKS_FILE = "team_tasks.json"
 
+# ===================== TEAM MEMBERS =====================
+TEAM_MEMBERS = sorted(["Sawyer", "Tony", "Chris", "Nate", "Cynthia", "James", "Ricardo", "Stephen"])
+
 def load_tasks():
     if os.path.exists(TASKS_FILE):
         with open(TASKS_FILE, "r") as f:
@@ -27,7 +30,7 @@ def clean_note_text(notes_text):
 # ===================== PAGE CONFIG =====================
 st.set_page_config(page_title="Team Task Tracker", layout="wide", page_icon="🚀")
 
-st.title("🚀 Team OP Tracker")
+st.title("🚀 Team Task Progress Tracker")
 st.caption("Track progress across the team")
 
 tasks = load_tasks()
@@ -156,7 +159,7 @@ st.subheader("🛠️ Manage Tasks")
 
 col_update, col_remove = st.columns(2)
 
-# ===================== UPDATE TASK (with Reassign) =====================
+# ===================== UPDATE TASK (with Reassign + Preloaded Options) =====================
 with col_update:
     with st.container(border=True):
         st.markdown("#### ✏️ Update Task")
@@ -175,12 +178,41 @@ with col_update:
                 key="new_status"
             )
 
-            # Reassign
-            new_assignee = st.text_input(
-                "Reassign To", 
-                value=task["assignee"],
-                key="new_assignee"
+            # ===================== REASSIGN WITH PRELOADED OPTIONS =====================
+            current_assignee = task["assignee"]
+
+            # Build options list (alphabetically sorted)
+            assignee_options = TEAM_MEMBERS.copy()
+
+            # Add current assignee if it's not in the list (for legacy data)
+            if current_assignee not in assignee_options:
+                assignee_options = [current_assignee] + assignee_options
+
+            # Add "Other" option
+            full_options = assignee_options + ["Other (type custom)"]
+
+            # Determine default selection
+            if current_assignee in assignee_options:
+                default_index = assignee_options.index(current_assignee)
+            else:
+                default_index = len(assignee_options)  # "Other"
+
+            selected_reassign = st.selectbox(
+                "Reassign To",
+                options=full_options,
+                index=default_index,
+                key="reassign_select"
             )
+
+            if selected_reassign == "Other (type custom)":
+                new_assignee = st.text_input(
+                    "Custom Assignee",
+                    value=current_assignee,
+                    key="custom_assignee"
+                )
+            else:
+                new_assignee = selected_reassign
+            # ===================== END REASSIGN =====================
 
             # Note
             new_note = st.text_area(
