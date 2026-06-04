@@ -32,10 +32,6 @@ st.caption("Track progress across the team")
 
 tasks = load_tasks()
 
-# ===================== SESSION STATE FOR TAB NAVIGATION =====================
-if "force_current_tab" not in st.session_state:
-    st.session_state.force_current_tab = False
-
 # ===================== SIDEBAR =====================
 st.sidebar.header("🔍 Filters")
 all_assignees = sorted(set(t["assignee"] for t in tasks)) if tasks else []
@@ -59,87 +55,7 @@ col4.metric("📌 Open Tasks", open_tasks)
 
 st.divider()
 
-# ===================== FORCE CURRENT TASKS VIEW (after update) =====================
-if st.session_state.force_current_tab:
-    st.session_state.force_current_tab = False  # Reset flag
-
-    # Big emoji CSS
-    st.markdown("""
-    <style>
-    [data-testid="stDataFrame"] td:first-child {
-        font-size: 5.5em !important;
-        text-align: center !important;
-        vertical-align: middle !important;
-        padding: 8px 4px !important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-    st.subheader("📋 Current Tasks")
-
-    filtered = [t for t in tasks 
-                if (not selected_assignees or t["assignee"] in selected_assignees)
-                and t["status"] in selected_statuses]
-
-    if filtered:
-        df = pd.DataFrame(filtered)
-        df["Notes"] = df["notes"].apply(
-            lambda x: clean_note_text(x)[:80] + "…" if len(clean_note_text(x)) > 80 else clean_note_text(x)
-        )
-
-        display_df = df[["id", "name", "assignee", "status", "Notes", "last_updated"]].copy()
-        display_df["last_updated"] = pd.to_datetime(display_df["last_updated"]).dt.strftime("%m/%d %H:%M")
-        display_df = display_df.rename(columns={"status": "Status"})
-
-        def get_status_icon(status):
-            if status == "Done": return "✅"
-            elif status == "In Progress": return "🔄"
-            elif status == "Blocked": return "⛔"
-            elif status == "To Do": return "📝"
-            return ""
-
-        display_df.insert(0, " ", display_df["Status"].apply(get_status_icon))
-        display_df = display_df.drop(columns=["id"])
-
-        def highlight_rows(row):
-            status = row["Status"]
-            color = {"Done": "#d4edda", "In Progress": "#fff3cd", 
-                     "Blocked": "#f8d7da", "To Do": "#cce5ff"}.get(status, "")
-            return [f'background-color: {color}' for _ in row]
-
-        def color_status_text(val):
-            colors = {
-                "Done": "color: #155724; font-weight: 600;",
-                "In Progress": "color: #856404; font-weight: 600;",
-                "Blocked": "color: #721c24; font-weight: 600;",
-                "To Do": "color: #004085; font-weight: 600;",
-            }
-            return colors.get(val, "")
-
-        styled_df = (
-            display_df.style
-            .apply(highlight_rows, axis=1)
-            .map(color_status_text, subset=["Status"])
-        )
-
-        with st.container(border=True):
-            st.dataframe(
-                styled_df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    " ": st.column_config.TextColumn("", width="medium"),
-                    "name": st.column_config.TextColumn("Task", width="large"),
-                    "Notes": st.column_config.TextColumn("Notes", width="medium"),
-                    "Status": st.column_config.TextColumn("Status", width="medium"),
-                }
-            )
-    else:
-        st.info("No tasks match the current filters.")
-
-    st.stop()  # Stop here so we don't show the tabs
-
-# ===================== NORMAL TABS VIEW =====================
+# ===================== TABS =====================
 tab_current, tab_manage, tab_add = st.tabs([
     "📋 Current Tasks", 
     "🛠️ Manage Tasks", 
@@ -148,6 +64,7 @@ tab_current, tab_manage, tab_add = st.tabs([
 
 # ===================== TAB 1: CURRENT TASKS =====================
 with tab_current:
+    # Big emoji styling
     st.markdown("""
     <style>
     [data-testid="stDataFrame"] td:first-child {
@@ -262,8 +179,7 @@ with tab_manage:
                     task["last_updated"] = datetime.now().isoformat()
                     save_tasks(tasks)
                     
-                    # === KEY CHANGE: Force user back to Current Tasks tab ===
-                    st.session_state.force_current_tab = True
+                    # Just rerun — Streamlit will automatically show the first tab (Current Tasks)
                     st.rerun()
             else:
                 st.info("No tasks available to update.")
