@@ -182,37 +182,29 @@ with tab_manage:
             else:
                 st.info("No tasks available to update.")
 
-    # --- Remove Tasks ---
-    with col_remove:
-        with st.container(border=True):
-            st.markdown("#### 🗑️ Remove Tasks")
-            
-            if tasks:
-                task_labels = {
-                    f"#{t['id']} - {t['name']} ({t['assignee']}) [{t['status']}]": t['id'] 
-                    for t in tasks
-                }
+# --- Remove Tasks ---
+with col_remove:
+    with st.container(border=True):
+        st.markdown("#### 🗑️ Remove Tasks")
+        
+        if tasks:
+            task_labels = {
+                f"#{t['id']} - {t['name']} ({t['assignee']}) [{t['status']}]": t['id'] 
+                for t in tasks
+            }
 
-                selected_to_remove = st.multiselect(
-                    "Select task(s) to remove",
-                    options=list(task_labels.keys()),
-                    key="remove_select"
-                )
+            selected_to_remove = st.multiselect(
+                "Select task(s) to remove",
+                options=list(task_labels.keys()),
+                key="remove_select"
+            )
 
-                if selected_to_remove:
-                    confirm = st.checkbox(
-                        f"Confirm removal of {len(selected_to_remove)} task(s)", 
-                        key="confirm_remove"
-                    )
-                    
-                    if st.button("Remove Selected", disabled=not confirm, type="secondary", use_container_width=True):
-                        ids_to_remove = [task_labels[label] for label in selected_to_remove]
-                        tasks = [t for t in tasks if t["id"] not in ids_to_remove]
-                        save_tasks(tasks)
-                        st.success(f"Removed {len(ids_to_remove)} task(s).")
-                        st.rerun()
-            else:
-                st.info("No tasks to remove.")
+            if selected_to_remove:
+                if st.button("Remove Selected", type="secondary", use_container_width=True):
+                    # Open confirmation dialog
+                    remove_tasks_dialog(selected_to_remove, task_labels)
+        else:
+            st.info("No tasks to remove.")
 
     with st.expander("📜 Show Full Original Notes (with timestamps)"):
         if tasks:
