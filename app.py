@@ -76,7 +76,7 @@ with st.container(border=True):
                 new_task = {
                     "id": new_id,
                     "name": task_name.strip(),
-                    "assignee": assignee.strip() or "Unassigned",
+                    "assignee": assignee.strip(),
                     "status": "To Do",
                     "notes": "",
                     "created": datetime.now().isoformat(),
