@@ -44,8 +44,8 @@ def remove_tasks_dialog(selected_to_remove, task_labels):
     st.divider()
 
     confirm_input = st.text_input(
-        "Type 'keyword' to confirm deletion",
-        placeholder="",
+        "Type keyword to confirm deletion",
+        placeholder="Take a Guess",
         key="remove_confirm_input"
     )
 
