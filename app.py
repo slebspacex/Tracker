@@ -85,7 +85,7 @@ with st.expander("➕ Add New Task", expanded=True):
                 st.success(f"Task #{new_id} added!")
                 st.rerun()
 
-# === Current Tasks (with clean Notes column) ===
+# === Current Tasks (with row + status text coloring) ===
 st.subheader("Current Tasks")
 
 filtered = [t for t in tasks 
@@ -95,23 +95,62 @@ filtered = [t for t in tasks
 if filtered:
     df = pd.DataFrame(filtered)
 
-    # Clean notes (remove timestamps) and create preview for the table
+    # Clean notes
     df["Notes"] = df["notes"].apply(
         lambda x: clean_note_text(x)[:80] + "…" if len(clean_note_text(x)) > 80 else clean_note_text(x)
     )
 
-    # Select columns for display
+    # Prepare display dataframe
     display_df = df[["id", "name", "assignee", "status", "Notes", "last_updated"]].copy()
     display_df["last_updated"] = pd.to_datetime(display_df["last_updated"]).dt.strftime("%m/%d %H:%M")
 
+    # Rename for clarity
+    display_df = display_df.rename(columns={"status": "Status"})
+
+    # ====================== STYLING FUNCTIONS ======================
+    def highlight_rows(row):
+        """Color the entire row based on status"""
+        status = row["Status"]
+        if status == "Done":
+            color = "#d4edda"      # Light green
+        elif status == "In Progress":
+            color = "#fff3cd"      # Light yellow
+        elif status == "Blocked":
+            color = "#f8d7da"      # Light red
+        elif status == "To Do":
+            color = "#cce5ff"      # Light blue
+        else:
+            color = ""
+        return [f'background-color: {color}' for _ in row]
+
+    def color_status_text(val):
+        """Color the text in the Status column"""
+        if val == "Done":
+            return "color: #155724; font-weight: 600;"           # Dark green
+        elif val == "In Progress":
+            return "color: #856404; font-weight: 600;"           # Dark yellow/gold
+        elif val == "Blocked":
+            return "color: #721c24; font-weight: 600;"           # Dark red
+        elif val == "To Do":
+            return "color: #004085; font-weight: 600;"           # Dark blue
+        return ""
+
+    # Apply styling
+    styled_df = (
+        display_df.style
+        .apply(highlight_rows, axis=1)
+        .map(color_status_text, subset=["Status"])
+    )
+
     st.dataframe(
-        display_df,
+        styled_df,
         use_container_width=True,
         hide_index=True,
         column_config={
             "id": st.column_config.NumberColumn("ID", width="small"),
             "name": st.column_config.TextColumn("Task", width="large"),
             "Notes": st.column_config.TextColumn("Notes", width="medium"),
+            "Status": st.column_config.TextColumn("Status", width="medium"),
         }
     )
 else:
