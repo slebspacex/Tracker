@@ -27,7 +27,7 @@ def clean_note_text(notes_text):
 # ===================== PAGE CONFIG =====================
 st.set_page_config(page_title="Team Task Tracker", layout="wide", page_icon="🚀")
 
-st.title("🚀 Team Task Progress Tracker")
+st.title("🚀 Team OP Tracker")
 st.caption("Track progress across the team")
 
 tasks = load_tasks()
