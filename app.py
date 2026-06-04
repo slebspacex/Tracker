@@ -7,9 +7,6 @@ import re
 
 TASKS_FILE = "team_tasks.json"
 
-# ===================== TEAM MEMBERS =====================
-TEAM_MEMBERS = sorted(["Sawyer", "Tony", "Chris", "Nate", "Cynthia", "James", "Ricardo", "Stephen"])
-
 def load_tasks():
     if os.path.exists(TASKS_FILE):
         with open(TASKS_FILE, "r") as f:
@@ -69,19 +66,7 @@ with st.container(border=True):
             task_name = st.text_input("Task Name*", placeholder="What needs to be done?")
 
         with col_b:
-            # === Assignee Dropdown for New Task ===
-            assignee_options = TEAM_MEMBERS + ["Other (type custom)"]
-            selected_assignee = st.selectbox(
-                "Assignee",
-                options=assignee_options,
-                index=0,  # Default to first name (alphabetically)
-                key="add_assignee_select"
-            )
-
-            if selected_assignee == "Other (type custom)":
-                assignee = st.text_input("Custom Assignee", value="", key="add_custom_assignee")
-            else:
-                assignee = selected_assignee
+            assignee = st.text_input("Assignee", value="Unassigned")
 
         submitted = st.form_submit_button("Add Task", type="primary", use_container_width=True)
 
@@ -174,7 +159,7 @@ st.subheader("🛠️ Manage Tasks")
 
 col_update, col_remove = st.columns(2)
 
-# ===================== UPDATE TASK (Reassign) =====================
+# ===================== UPDATE TASK =====================
 with col_update:
     with st.container(border=True):
         st.markdown("#### ✏️ Update Task")
@@ -193,31 +178,12 @@ with col_update:
                 key="new_status"
             )
 
-            # === Reassign Dropdown ===
-            current_assignee = task["assignee"]
-            assignee_options = TEAM_MEMBERS + ["Other (type custom)"]
-
-            # Set default index
-            if current_assignee in TEAM_MEMBERS:
-                default_index = TEAM_MEMBERS.index(current_assignee)
-            else:
-                default_index = len(TEAM_MEMBERS)  # "Other"
-
-            selected_reassign = st.selectbox(
-                "Reassign To",
-                options=assignee_options,
-                index=default_index,
-                key="reassign_select"
+            # Reassign (free text)
+            new_assignee = st.text_input(
+                "Reassign To", 
+                value=task["assignee"],
+                key="new_assignee"
             )
-
-            if selected_reassign == "Other (type custom)":
-                new_assignee = st.text_input(
-                    "Custom Assignee",
-                    value=current_assignee,
-                    key="custom_assignee"
-                )
-            else:
-                new_assignee = selected_reassign
 
             # Note
             new_note = st.text_area(
