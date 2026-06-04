@@ -24,6 +24,45 @@ def clean_note_text(notes_text):
     cleaned = re.sub(r'\s+', ' ', cleaned).strip()
     return cleaned
 
+def clean_note_text(notes_text):
+    if not isinstance(notes_text, str) or not notes_text.strip():
+        return ""
+    cleaned = re.sub(r'\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})?\]\s*', '', notes_text)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    return cleaned
+
+
+# ===================== REMOVE TASKS DIALOG =====================
+@st.dialog("Confirm Task Removal")
+def remove_tasks_dialog(selected_to_remove, task_labels):
+    st.warning("This action cannot be undone.")
+
+    st.write("**You are about to permanently remove the following task(s):**")
+    for label in selected_to_remove:
+        st.write(f"- {label}")
+
+    st.divider()
+
+    confirm_input = st.text_input(
+        "Type 'mm' to confirm deletion",
+        placeholder="mm",
+        key="remove_confirm_input"
+    )
+
+    if st.button(
+        "Permanently Remove Tasks",
+        type="primary",
+        use_container_width=True,
+        disabled=(confirm_input.strip().lower() != "mm")
+    ):
+        ids_to_remove = [task_labels[label] for label in selected_to_remove]
+        global tasks
+        tasks = [t for t in tasks if t["id"] not in ids_to_remove]
+        save_tasks(tasks)
+        st.success(f"Successfully removed {len(ids_to_remove)} task(s).")
+        st.rerun()
+
+
 # ===================== PAGE CONFIG =====================
 st.set_page_config(page_title="Team Task Tracker", layout="wide", page_icon="🚀")
 
@@ -201,19 +240,10 @@ with col_remove:
 
             if selected_to_remove:
                 if st.button("Remove Selected", type="secondary", use_container_width=True):
-                    # Open confirmation dialog
                     remove_tasks_dialog(selected_to_remove, task_labels)
         else:
             st.info("No tasks to remove.")
 
-    with st.expander("📜 Show Full Original Notes (with timestamps)"):
-        if tasks:
-            for t in tasks:
-                if t.get("notes"):
-                    st.markdown(f"**#{t['id']} – {t['name']}** ({t['assignee']})")
-                    st.text(t["notes"])
-        else:
-            st.info("No notes available.")
 
 # ===================== TAB 3: ADD TASK =====================
 with tab_add:
