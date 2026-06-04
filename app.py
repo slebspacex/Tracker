@@ -64,8 +64,10 @@ with st.container(border=True):
             task_name = st.text_input("Task Name*", placeholder="What needs to be done?")
         with col_b:
             assignee = st.text_input("Assignee", value="Unassigned")
-        
-        if st.form_submit_button("Add Task", type="primary"):
+
+        submitted = st.form_submit_button("Add Task", type="primary", use_container_width=True)
+
+        if submitted:
             if task_name.strip():
                 new_id = max([t["id"] for t in tasks], default=0) + 1
                 new_task = {
@@ -79,13 +81,13 @@ with st.container(border=True):
                 }
                 tasks.append(new_task)
                 save_tasks(tasks)
-                st.success(f"Task #{new_id} added!")
+                st.success(f"Task #{new_id} added successfully!")
                 st.rerun()
             else:
                 st.warning("Task name is required.")
 
-# ===================== CURRENT TASKS (MAIN FOCUS) =====================
-st.header("📋 Current Tasks", divider="blue")
+# ===================== CURRENT TASKS =====================
+st.subheader("📋 Current Tasks")
 
 filtered = [t for t in tasks 
             if (not selected_assignees or t["assignee"] in selected_assignees)
@@ -150,28 +152,27 @@ else:
     st.info("No tasks match the current filters.")
 
 # ===================== TASK MANAGEMENT =====================
-st.divider()
 st.subheader("🛠️ Manage Tasks")
 
 col_update, col_remove = st.columns(2)
 
-# Update Task
+# --- Update Task ---
 with col_update:
     with st.container(border=True):
-        st.markdown("**Update Task**")
+        st.markdown("#### ✏️ Update Task Progress")
+        
         if tasks:
             task_options = {f"#{t['id']} - {t['name']} ({t['assignee']})": t['id'] for t in tasks}
             selected_label = st.selectbox("Select task", list(task_options.keys()), key="update_select")
             selected_id = task_options[selected_label]
             task = next(t for t in tasks if t["id"] == selected_id)
 
-            new_status = st.selectbox("New Status", statuses, index=statuses.index(task["status"]), key="new_status")
-            new_assignee = st.text_input("Reassign To", value=task["assignee"], key="new_assignee")
-            new_note = st.text_area("Add note (optional)", value="", height=80, key="new_note")
+            new_status = st.selectbox("New Status", statuses, 
+                                      index=statuses.index(task["status"]), key="new_status")
+            new_note = st.text_area("Add note (optional)", value="", height=100, key="new_note")
 
             if st.button("Update Task", type="primary", use_container_width=True):
                 task["status"] = new_status
-                task["assignee"] = new_assignee.strip() or "Unassigned"
                 if new_note.strip():
                     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
                     task["notes"] = (task.get("notes", "") + f"\n[{timestamp}] {new_note.strip()}").strip()
@@ -180,21 +181,31 @@ with col_update:
                 st.success("Task updated!")
                 st.rerun()
         else:
-            st.info("No tasks to update.")
+            st.info("No tasks available to update.")
 
-# Remove Tasks
+# --- Remove Tasks ---
 with col_remove:
     with st.container(border=True):
-        st.markdown("**Remove Tasks**")
+        st.markdown("#### 🗑️ Remove Tasks")
+        
         if tasks:
             task_labels = {
                 f"#{t['id']} - {t['name']} ({t['assignee']}) [{t['status']}]": t['id'] 
                 for t in tasks
             }
-            selected_to_remove = st.multiselect("Select task(s) to remove", options=list(task_labels.keys()), key="remove_select")
+
+            selected_to_remove = st.multiselect(
+                "Select task(s) to remove",
+                options=list(task_labels.keys()),
+                key="remove_select"
+            )
 
             if selected_to_remove:
-                confirm = st.checkbox(f"Confirm removal of {len(selected_to_remove)} task(s)", key="confirm_remove")
+                confirm = st.checkbox(
+                    f"Confirm removal of {len(selected_to_remove)} task(s)", 
+                    key="confirm_remove"
+                )
+                
                 if st.button("Remove Selected", disabled=not confirm, type="secondary", use_container_width=True):
                     ids_to_remove = [task_labels[label] for label in selected_to_remove]
                     tasks = [t for t in tasks if t["id"] not in ids_to_remove]
@@ -204,7 +215,7 @@ with col_remove:
         else:
             st.info("No tasks to remove.")
 
-# Full notes (hidden by default)
+# ===================== DEBUG / NOTES SECTION =====================
 with st.expander("📜 Show Full Original Notes (with timestamps)"):
     if tasks:
         for t in tasks:
