@@ -27,46 +27,6 @@ def clean_note_text(notes_text):
 # ===================== PAGE CONFIG =====================
 st.set_page_config(page_title="Team Task Tracker", layout="wide", page_icon="🚀")
 
-# ===================== BACKGROUND IMAGE =====================
-st.markdown(
-    """
-    <style>
-    .stApp {
-        background-image: url("elon.webp");
-        background-size: cover;
-        background-position: center;
-        background-repeat: no-repeat;
-        background-attachment: fixed;
-    }
-
-    /* Dark overlay for readability */
-    .stApp::before {
-        content: "";
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        background-color: rgba(0, 0, 0, 0.72);
-        z-index: -1;
-    }
-
-    /* Improve text readability */
-    .stApp, .stApp * {
-        color: #f0f0f0 !important;
-    }
-    
-    /* Make metrics and containers stand out better */
-    [data-testid="stMetric"] {
-        background-color: rgba(255, 255, 255, 0.08);
-        border-radius: 8px;
-        padding: 8px;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
-
 st.title("🚀 MM OPs Tracker")
 st.caption("Track progress across the team")
 
