@@ -27,7 +27,7 @@ def clean_note_text(notes_text):
 # ===================== PAGE CONFIG =====================
 st.set_page_config(page_title="Team Task Tracker", layout="wide", page_icon="🚀")
 
-st.title("🚀 Team OPs Tracker")
+st.title("🚀 MM OPs Tracker")
 st.caption("Track progress across the team")
 
 tasks = load_tasks()
@@ -40,7 +40,7 @@ selected_assignees = st.sidebar.multiselect("Assignee", all_assignees, default=a
 statuses = ["To Do", "In Progress", "Done", "Blocked"]
 selected_statuses = st.sidebar.multiselect("Status", statuses, default=statuses)
 
-# ===================== METRICS (always visible) =====================
+# ===================== METRICS =====================
 today = date.today()
 done_today = sum(1 for t in tasks if t["status"] == "Done" and 
                  datetime.fromisoformat(t["last_updated"]).date() == today)
@@ -62,8 +62,20 @@ tab_current, tab_manage, tab_add = st.tabs([
     "➕ Add Task"
 ])
 
-# ===================== TAB 1: CURRENT TASKS (Main/Landing) =====================
+# ===================== TAB 1: CURRENT TASKS (Main) =====================
 with tab_current:
+    # Make emojis much bigger
+    st.markdown("""
+    <style>
+    [data-testid="stDataFrame"] td:first-child {
+        font-size: 5.5em !important;
+        text-align: center !important;
+        vertical-align: middle !important;
+        padding: 8px 4px !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
     st.subheader("📋 Current Tasks")
 
     filtered = [t for t in tasks 
@@ -81,7 +93,6 @@ with tab_current:
         display_df["last_updated"] = pd.to_datetime(display_df["last_updated"]).dt.strftime("%m/%d %H:%M")
         display_df = display_df.rename(columns={"status": "Status"})
 
-        # Status icons
         def get_status_icon(status):
             if status == "Done":
                 return "✅"
@@ -93,10 +104,11 @@ with tab_current:
                 return "📝"
             return ""
 
+        # Add icon column
         display_df.insert(0, " ", display_df["Status"].apply(get_status_icon))
         display_df = display_df.drop(columns=["id"])
 
-        # Row highlighting
+        # Row + status coloring
         def highlight_rows(row):
             status = row["Status"]
             if status == "Done":
@@ -134,7 +146,7 @@ with tab_current:
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    " ": st.column_config.TextColumn("", width="small"),
+                    " ": st.column_config.TextColumn("", width="medium"),   # Wider column for big emojis
                     "name": st.column_config.TextColumn("Task", width="large"),
                     "Notes": st.column_config.TextColumn("Notes", width="medium"),
                     "Status": st.column_config.TextColumn("Status", width="medium"),
@@ -149,7 +161,7 @@ with tab_manage:
 
     col_update, col_remove = st.columns(2)
 
-    # --- Update Task ---
+    # --- Update Task (now includes assignee) ---
     with col_update:
         with st.container(border=True):
             st.markdown("#### ✏️ Update Task Progress")
@@ -162,13 +174,27 @@ with tab_manage:
 
                 new_status = st.selectbox("New Status", statuses, 
                                           index=statuses.index(task["status"]), key="new_status")
+                
+                # NEW: Change Assignee
+                new_assignee = st.text_input(
+                    "Assignee", 
+                    value=task.get("assignee", "Unassigned"),
+                    key="new_assignee"
+                )
+
                 new_note = st.text_area("Add note (optional)", value="", height=100, key="new_note")
 
                 if st.button("Update Task", type="primary", use_container_width=True):
                     task["status"] = new_status
+                    
+                    # Update assignee if changed
+                    if new_assignee.strip() and new_assignee.strip() != task.get("assignee", ""):
+                        task["assignee"] = new_assignee.strip()
+                    
                     if new_note.strip():
                         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
                         task["notes"] = (task.get("notes", "") + f"\n[{timestamp}] {new_note.strip()}").strip()
+                    
                     task["last_updated"] = datetime.now().isoformat()
                     save_tasks(tasks)
                     st.success("Task updated!")
@@ -208,7 +234,7 @@ with tab_manage:
             else:
                 st.info("No tasks to remove.")
 
-    # Full notes expander (moved here)
+    # Full notes
     with st.expander("📜 Show Full Original Notes (with timestamps)"):
         if tasks:
             for t in tasks:
@@ -249,5 +275,3 @@ with tab_add:
                     st.rerun()
                 else:
                     st.warning("Task name is required.")
-
-# ===================== (Optional) Keep a small note at the very bottom if needed =====================
