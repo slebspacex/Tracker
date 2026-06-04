@@ -7,6 +7,9 @@ import re
 
 TASKS_FILE = "team_tasks.json"
 
+# Team members for dropdown (alphabetically sorted)
+TEAM_MEMBERS = sorted(["Sawyer", "Tony", "Chris", "Nate", "Cynthia", "James", "Ricardo", "Stephen"])
+
 def load_tasks():
     if os.path.exists(TASKS_FILE):
         with open(TASKS_FILE, "r") as f:
@@ -55,6 +58,52 @@ col4.metric("📌 Open Tasks", open_tasks)
 
 st.divider()
 
+# ===================== ADD NEW TASK =====================
+with st.container(border=True):
+    st.subheader("➕ Add New Task")
+
+    with st.form("add_form", clear_on_submit=True):
+        col_a, col_b = st.columns([3, 2])
+
+        with col_a:
+            task_name = st.text_input("Task Name*", placeholder="What needs to be done?")
+
+        with col_b:
+            # Assignee dropdown
+            assignee_options = TEAM_MEMBERS + ["Other (type custom)"]
+            selected_assignee = st.selectbox(
+                "Assignee",
+                options=assignee_options,
+                index=0,
+                key="add_assignee_select"
+            )
+
+            if selected_assignee == "Other (type custom)":
+                assignee = st.text_input("Custom Assignee", value="", key="add_custom_assignee")
+            else:
+                assignee = selected_assignee
+
+        submitted = st.form_submit_button("Add Task", type="primary", use_container_width=True)
+
+        if submitted:
+            if task_name.strip():
+                new_id = max([t["id"] for t in tasks], default=0) + 1
+                new_task = {
+                    "id": new_id,
+                    "name": task_name.strip(),
+                    "assignee": assignee.strip() or "Unassigned",
+                    "status": "To Do",
+                    "notes": "",
+                    "created": datetime.now().isoformat(),
+                    "last_updated": datetime.now().isoformat()
+                }
+                tasks.append(new_task)
+                save_tasks(tasks)
+                st.success(f"Task #{new_id} added successfully!")
+                st.rerun()
+            else:
+                st.warning("Task name is required.")
+
 # ===================== CURRENT TASKS (MAIN FOCUS) =====================
 st.header("📋 Current Tasks", divider="blue")
 
@@ -73,7 +122,7 @@ if filtered:
     display_df["last_updated"] = pd.to_datetime(display_df["last_updated"]).dt.strftime("%m/%d %H:%M")
     display_df = display_df.rename(columns={"status": "Status"})
 
-    # ====================== ROW + STATUS COLORING ======================
+    # Row and status coloring
     def highlight_rows(row):
         status = row["Status"]
         if status == "Done":
@@ -120,35 +169,7 @@ if filtered:
 else:
     st.info("No tasks match the current filters.")
 
-# ===================== ADD NEW TASK (Lower priority) =====================
-with st.expander("➕ Add New Task", expanded=False):
-    with st.form("add_form", clear_on_submit=True):
-        col_a, col_b = st.columns([3, 2])
-        with col_a:
-            task_name = st.text_input("Task Name*", placeholder="What needs to be done?")
-        with col_b:
-            assignee = st.text_input("Assignee", value="Unassigned")
-
-        if st.form_submit_button("Add Task", type="primary"):
-            if task_name.strip():
-                new_id = max([t["id"] for t in tasks], default=0) + 1
-                new_task = {
-                    "id": new_id,
-                    "name": task_name.strip(),
-                    "assignee": assignee.strip() or "Unassigned",
-                    "status": "To Do",
-                    "notes": "",
-                    "created": datetime.now().isoformat(),
-                    "last_updated": datetime.now().isoformat()
-                }
-                tasks.append(new_task)
-                save_tasks(tasks)
-                st.success(f"Task #{new_id} added!")
-                st.rerun()
-            else:
-                st.warning("Task name is required.")
-
-# ===================== TASK MANAGEMENT (Lower priority) =====================
+# ===================== TASK MANAGEMENT =====================
 st.divider()
 st.subheader("🛠️ Manage Tasks")
 
@@ -203,7 +224,7 @@ with col_remove:
         else:
             st.info("No tasks to remove.")
 
-# ===================== FULL NOTES (Hidden by default) =====================
+# Full notes (hidden by default)
 with st.expander("📜 Show Full Original Notes (with timestamps)"):
     if tasks:
         for t in tasks:
