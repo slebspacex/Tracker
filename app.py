@@ -47,6 +47,7 @@ def remove_tasks_dialog(selected_to_remove, task_labels):
         "Type keyword to confirm deletion",
         placeholder="Take a Guess",
         key="remove_confirm_input"
+        type="password"
     )
 
     if st.button(
