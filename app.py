@@ -104,6 +104,22 @@ if filtered:
     display_df["last_updated"] = pd.to_datetime(display_df["last_updated"]).dt.strftime("%m/%d %H:%M")
     display_df = display_df.rename(columns={"status": "Status"})
 
+    # ====================== STATUS ICON ======================
+    def get_status_icon(status):
+        if status == "Done":
+            return "✅"
+        elif status == "In Progress":
+            return "🔄"
+        elif status == "Blocked":
+            return "⛔"
+        elif status == "To Do":
+            return "📝"
+        return ""
+
+    # Add icon column and remove numeric ID
+    display_df.insert(0, " ", display_df["Status"].apply(get_status_icon))
+    display_df = display_df.drop(columns=["id"])   # Remove numeric ID
+
     # ====================== ROW + STATUS COLORING ======================
     def highlight_rows(row):
         status = row["Status"]
@@ -142,7 +158,7 @@ if filtered:
             use_container_width=True,
             hide_index=True,
             column_config={
-                "id": st.column_config.NumberColumn("ID", width="small"),
+                " ": st.column_config.TextColumn("", width="small"),           # Status icon
                 "name": st.column_config.TextColumn("Task", width="large"),
                 "Notes": st.column_config.TextColumn("Notes", width="medium"),
                 "Status": st.column_config.TextColumn("Status", width="medium"),
