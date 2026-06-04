@@ -18,273 +18,200 @@ def save_tasks(tasks):
         json.dump(tasks, f, indent=2)
 
 def clean_note_text(notes_text):
+    """Remove timestamps like [2025-06-04 10:15] from notes for cleaner display."""
     if not isinstance(notes_text, str) or not notes_text.strip():
         return ""
+    
+    # Remove timestamp patterns: [2025-06-04 10:15] or [2025-06-04 10:15:30]
     cleaned = re.sub(r'\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})?\]\s*', '', notes_text)
+    
+    # Clean up extra whitespace (newlines, multiple spaces, etc.)
     cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    
     return cleaned
 
-
-def format_tasks_for_table(task_list):
-    """Formats tasks as bullet points for the Work Completed table"""
-    if not task_list:
-        return "- No tasks completed today"
-    
-    lines = []
-    for t in task_list:
-        note = clean_note_text(t.get("notes", ""))
-        line = f"- **{t['name']}** ({t['assignee']})"
-        if note:
-            line += f"<br>  - {note}"
-        lines.append(line)
-    return "<br>".join(lines)
-
-
-def format_task_list(task_list):
-    """Formats tasks as a simple bullet list"""
-    if not task_list:
-        return "- None"
-    
-    lines = []
-    for t in task_list:
-        note = clean_note_text(t.get("notes", ""))
-        line = f"- **{t['name']}** ({t['assignee']})"
-        if note:
-            line += f" — {note}"
-        lines.append(line)
-    return "\n".join(lines)
-
-
-
-# ===================== PAGE CONFIG =====================
-st.set_page_config(page_title="Team Task Tracker", layout="wide", page_icon="🚀")
-
-st.title("🚀 MM OPs Tracker")
-st.caption("Track progress across the team")
+st.set_page_config(page_title="Team Task Tracker", layout="wide")
+st.title("🚀 Team Task Progress Tracker")
 
 tasks = load_tasks()
 
 # ===================== SIDEBAR =====================
-st.sidebar.header("🔍 Filters")
+st.sidebar.header("Filters")
 all_assignees = sorted(set(t["assignee"] for t in tasks)) if tasks else []
 selected_assignees = st.sidebar.multiselect("Assignee", all_assignees, default=all_assignees)
 
 statuses = ["To Do", "In Progress", "Done", "Blocked"]
 selected_statuses = st.sidebar.multiselect("Status", statuses, default=statuses)
 
-# ===================== METRICS =====================
+# ===================== MAIN CONTENT =====================
+
+# Metrics
 today = date.today()
 done_today = sum(1 for t in tasks if t["status"] == "Done" and 
                  datetime.fromisoformat(t["last_updated"]).date() == today)
 in_progress = sum(1 for t in tasks if t["status"] == "In Progress")
-open_tasks = len([t for t in tasks if t["status"] in ["To Do", "In Progress"]])
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("✅ Done Today", done_today)
 col2.metric("🔄 In Progress", in_progress)
 col3.metric("📋 Total Tasks", len(tasks))
-col4.metric("📌 Open Tasks", open_tasks)
+col4.metric("📌 Open Tasks", len([t for t in tasks if t["status"] in ["To Do", "In Progress"]]))
 
 st.divider()
 
-# ===================== TABS =====================
-tab_current, tab_manage, tab_add = st.tabs([
-    "📋 Current Tasks", 
-    "🛠️ Manage Tasks", 
-    "➕ Add Task"
-])
-
-# ===================== TAB 1: CURRENT TASKS =====================
-with tab_current:
-    # Big emoji styling
-    st.markdown("""
-    <style>
-    [data-testid="stDataFrame"] td:first-child {
-        font-size: 5.5em !important;
-        text-align: center !important;
-        vertical-align: middle !important;
-        padding: 8px 4px !important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-    st.subheader("📋 Current Tasks")
-
-    filtered = [t for t in tasks 
-                if (not selected_assignees or t["assignee"] in selected_assignees)
-                and t["status"] in selected_statuses]
-
-    if filtered:
-        df = pd.DataFrame(filtered)
-        df["Notes"] = df["notes"].apply(
-            lambda x: clean_note_text(x)[:80] + "…" if len(clean_note_text(x)) > 80 else clean_note_text(x)
-        )
-
-        display_df = df[["id", "name", "assignee", "status", "Notes", "last_updated"]].copy()
-        display_df["last_updated"] = pd.to_datetime(display_df["last_updated"]).dt.strftime("%m/%d %H:%M")
-        display_df = display_df.rename(columns={"status": "Status"})
-
-        def get_status_icon(status):
-            if status == "Done": return "✅"
-            elif status == "In Progress": return "🔄"
-            elif status == "Blocked": return "⛔"
-            elif status == "To Do": return "📝"
-            return ""
-
-        display_df.insert(0, " ", display_df["Status"].apply(get_status_icon))
-        display_df = display_df.drop(columns=["id"])
-
-        def highlight_rows(row):
-            status = row["Status"]
-            color = {"Done": "#d4edda", "In Progress": "#fff3cd", 
-                     "Blocked": "#f8d7da", "To Do": "#cce5ff"}.get(status, "")
-            return [f'background-color: {color}' for _ in row]
-
-        def color_status_text(val):
-            colors = {
-                "Done": "color: #155724; font-weight: 600;",
-                "In Progress": "color: #856404; font-weight: 600;",
-                "Blocked": "color: #721c24; font-weight: 600;",
-                "To Do": "color: #004085; font-weight: 600;",
-            }
-            return colors.get(val, "")
-
-        styled_df = (
-            display_df.style
-            .apply(highlight_rows, axis=1)
-            .map(color_status_text, subset=["Status"])
-        )
-
-        with st.container(border=True):
-            st.dataframe(
-                styled_df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    " ": st.column_config.TextColumn("", width="medium"),
-                    "name": st.column_config.TextColumn("Task", width="large"),
-                    "Notes": st.column_config.TextColumn("Notes", width="medium"),
-                    "Status": st.column_config.TextColumn("Status", width="medium"),
+# === Add New Task ===
+with st.expander("➕ Add New Task", expanded=True):
+    with st.form("add_form", clear_on_submit=True):
+        col_a, col_b = st.columns([3, 2])
+        with col_a:
+            task_name = st.text_input("Task Name*")
+        with col_b:
+            assignee = st.text_input("Assignee", value="Unassigned")
+        
+        if st.form_submit_button("Add Task", type="primary"):
+            if task_name.strip():
+                new_id = max([t["id"] for t in tasks], default=0) + 1
+                new_task = {
+                    "id": new_id,
+                    "name": task_name.strip(),
+                    "assignee": assignee.strip() or "Unassigned",
+                    "status": "To Do",
+                    "notes": "",
+                    "created": datetime.now().isoformat(),
+                    "last_updated": datetime.now().isoformat()
                 }
-            )
-    else:
-        st.info("No tasks match the current filters.")
+                tasks.append(new_task)
+                save_tasks(tasks)
+                st.success(f"Task #{new_id} added!")
+                st.rerun()
 
-# ===================== TAB 2: MANAGE TASKS =====================
-with tab_manage:
-    st.subheader("🛠️ Manage Tasks")
+# === Current Tasks (with row + status text coloring) ===
+st.subheader("Current Tasks")
 
-    col_update, col_remove = st.columns(2)
+filtered = [t for t in tasks 
+            if (not selected_assignees or t["assignee"] in selected_assignees)
+            and t["status"] in selected_statuses]
 
-    # --- Update Task ---
-    with col_update:
-        with st.container(border=True):
-            st.markdown("#### ✏️ Update Task Progress")
-            
-            if tasks:
-                task_options = {f"#{t['id']} - {t['name']} ({t['assignee']})": t['id'] for t in tasks}
-                selected_label = st.selectbox("Select task", list(task_options.keys()), key="update_select")
-                selected_id = task_options[selected_label]
-                task = next(t for t in tasks if t["id"] == selected_id)
+if filtered:
+    df = pd.DataFrame(filtered)
 
-                new_status = st.selectbox("New Status", statuses, 
-                                          index=statuses.index(task["status"]), key="new_status")
-                
-                new_assignee = st.text_input(
-                    "Assignee", 
-                    value=task.get("assignee", "Unassigned"),
-                    key="new_assignee"
-                )
+    # Clean notes
+    df["Notes"] = df["notes"].apply(
+        lambda x: clean_note_text(x)[:80] + "…" if len(clean_note_text(x)) > 80 else clean_note_text(x)
+    )
 
-                new_note = st.text_area("Add note (optional)", value="", height=100, key="new_note")
+    # Prepare display dataframe
+    display_df = df[["id", "name", "assignee", "status", "Notes", "last_updated"]].copy()
+    display_df["last_updated"] = pd.to_datetime(display_df["last_updated"]).dt.strftime("%m/%d %H:%M")
 
-                if st.button("Update Task", type="primary", use_container_width=True):
-                    task["status"] = new_status
-                    
-                    if new_assignee.strip() and new_assignee.strip() != task.get("assignee", ""):
-                        task["assignee"] = new_assignee.strip()
-                    
-                    if new_note.strip():
-                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-                        task["notes"] = (task.get("notes", "") + f"\n[{timestamp}] {new_note.strip()}").strip()
-                    
-                    task["last_updated"] = datetime.now().isoformat()
-                    save_tasks(tasks)
-                    
-                    # Just rerun — Streamlit will automatically show the first tab (Current Tasks)
-                    st.rerun()
-            else:
-                st.info("No tasks available to update.")
+    # Rename for clarity
+    display_df = display_df.rename(columns={"status": "Status"})
 
-    # --- Remove Tasks ---
-    with col_remove:
-        with st.container(border=True):
-            st.markdown("#### 🗑️ Remove Tasks")
-            
-            if tasks:
-                task_labels = {
-                    f"#{t['id']} - {t['name']} ({t['assignee']}) [{t['status']}]": t['id'] 
-                    for t in tasks
-                }
-
-                selected_to_remove = st.multiselect(
-                    "Select task(s) to remove",
-                    options=list(task_labels.keys()),
-                    key="remove_select"
-                )
-
-                if selected_to_remove:
-                    confirm = st.checkbox(
-                        f"Confirm removal of {len(selected_to_remove)} task(s)", 
-                        key="confirm_remove"
-                    )
-                    
-                    if st.button("Remove Selected", disabled=not confirm, type="secondary", use_container_width=True):
-                        ids_to_remove = [task_labels[label] for label in selected_to_remove]
-                        tasks = [t for t in tasks if t["id"] not in ids_to_remove]
-                        save_tasks(tasks)
-                        st.success(f"Removed {len(ids_to_remove)} task(s).")
-                        st.rerun()
-            else:
-                st.info("No tasks to remove.")
-
-    with st.expander("📜 Show Full Original Notes (with timestamps)"):
-        if tasks:
-            for t in tasks:
-                if t.get("notes"):
-                    st.markdown(f"**#{t['id']} – {t['name']}** ({t['assignee']})")
-                    st.text(t["notes"])
+    # ====================== STYLING FUNCTIONS ======================
+    def highlight_rows(row):
+        """Color the entire row based on status"""
+        status = row["Status"]
+        if status == "Done":
+            color = "#d4edda"      # Light green
+        elif status == "In Progress":
+            color = "#fff3cd"      # Light yellow
+        elif status == "Blocked":
+            color = "#f8d7da"      # Light red
+        elif status == "To Do":
+            color = "#cce5ff"      # Light blue
         else:
-            st.info("No notes available.")
+            color = ""
+        return [f'background-color: {color}' for _ in row]
 
-# ===================== TAB 3: ADD TASK =====================
-with tab_add:
-    with st.container(border=True):
-        st.subheader("➕ Add New Task")
-        with st.form("add_form", clear_on_submit=True):
-            col_a, col_b = st.columns([3, 2])
-            with col_a:
-                task_name = st.text_input("Task Name*", placeholder="What needs to be done?")
-            with col_b:
-                assignee = st.text_input("Assignee", value="Unassigned")
+    def color_status_text(val):
+        """Color the text in the Status column"""
+        if val == "Done":
+            return "color: #155724; font-weight: 600;"           # Dark green
+        elif val == "In Progress":
+            return "color: #856404; font-weight: 600;"           # Dark yellow/gold
+        elif val == "Blocked":
+            return "color: #721c24; font-weight: 600;"           # Dark red
+        elif val == "To Do":
+            return "color: #004085; font-weight: 600;"           # Dark blue
+        return ""
 
-            submitted = st.form_submit_button("Add Task", type="primary", use_container_width=True)
+    # Apply styling
+    styled_df = (
+        display_df.style
+        .apply(highlight_rows, axis=1)
+        .map(color_status_text, subset=["Status"])
+    )
 
-            if submitted:
-                if task_name.strip():
-                    new_id = max([t["id"] for t in tasks], default=0) + 1
-                    new_task = {
-                        "id": new_id,
-                        "name": task_name.strip(),
-                        "assignee": assignee.strip() or "Unassigned",
-                        "status": "To Do",
-                        "notes": "",
-                        "created": datetime.now().isoformat(),
-                        "last_updated": datetime.now().isoformat()
-                    }
-                    tasks.append(new_task)
-                    save_tasks(tasks)
-                    st.success(f"Task #{new_id} added successfully!")
-                    st.rerun()
-                else:
-                    st.warning("Task name is required.")
+    st.dataframe(
+        styled_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "id": st.column_config.NumberColumn("ID", width="small"),
+            "name": st.column_config.TextColumn("Task", width="large"),
+            "Notes": st.column_config.TextColumn("Notes", width="medium"),
+            "Status": st.column_config.TextColumn("Status", width="medium"),
+        }
+    )
+else:
+    st.info("No tasks match the current filters.")
+
+# === Update Task ===
+st.subheader("Update Task Progress")
+
+if tasks:
+    task_options = {f"#{t['id']} - {t['name']} ({t['assignee']})": t['id'] for t in tasks}
+    selected_label = st.selectbox("Select a task to update", list(task_options.keys()))
+    selected_id = task_options[selected_label]
+    task = next(t for t in tasks if t["id"] == selected_id)
+
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        new_status = st.selectbox("New Status", statuses, index=statuses.index(task["status"]))
+    with col2:
+        new_note = st.text_area("Add note (optional)", value="", height=80)
+
+    if st.button("Update Task", type="primary"):
+        task["status"] = new_status
+        if new_note.strip():
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+            task["notes"] = (task.get("notes", "") + f"\n[{timestamp}] {new_note.strip()}").strip()
+        task["last_updated"] = datetime.now().isoformat()
+        save_tasks(tasks)
+        st.success("Task updated!")
+        st.rerun()
+
+# ===================== REMOVE TASKS =====================
+st.divider()
+st.subheader("🗑️ Remove Tasks")
+
+if tasks:
+    task_labels = {
+        f"#{t['id']} - {t['name']} ({t['assignee']}) [{t['status']}]": t['id'] 
+        for t in tasks
+    }
+
+    st.markdown("**Remove one or more tasks**")
+    selected_to_remove = st.multiselect(
+        "Select task(s) to remove",
+        options=list(task_labels.keys())
+    )
+
+    if selected_to_remove:
+        confirm = st.checkbox(f"I confirm I want to permanently remove the {len(selected_to_remove)} selected task(s)")
+        
+        if st.button("Remove Selected Task(s)", disabled=not confirm, type="secondary"):
+            ids_to_remove = [task_labels[label] for label in selected_to_remove]
+            tasks = [t for t in tasks if t["id"] not in ids_to_remove]
+            save_tasks(tasks)
+            st.success(f"Removed {len(ids_to_remove)} task(s).")
+            st.rerun()
+else:
+    st.info("There are no tasks to remove.")
+
+# Show full original notes (with timestamps) if needed
+if st.checkbox("Show full original notes (with timestamps)"):
+    for t in tasks:
+        if t.get("notes"):
+            st.markdown(f"**#{t['id']} – {t['name']}** ({t['assignee']})")
+            st.text(t["notes"])
