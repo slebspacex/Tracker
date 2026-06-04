@@ -61,12 +61,27 @@ st.divider()
 # ===================== ADD NEW TASK =====================
 with st.container(border=True):
     st.subheader("➕ Add New Task")
+
     with st.form("add_form", clear_on_submit=True):
         col_a, col_b = st.columns([3, 2])
+
         with col_a:
             task_name = st.text_input("Task Name*", placeholder="What needs to be done?")
+
         with col_b:
-            assignee = st.text_input("Assignee", value="Unassigned")
+            # === Assignee Dropdown for New Task ===
+            assignee_options = TEAM_MEMBERS + ["Other (type custom)"]
+            selected_assignee = st.selectbox(
+                "Assignee",
+                options=assignee_options,
+                index=0,  # Default to first name (alphabetically)
+                key="add_assignee_select"
+            )
+
+            if selected_assignee == "Other (type custom)":
+                assignee = st.text_input("Custom Assignee", value="", key="add_custom_assignee")
+            else:
+                assignee = selected_assignee
 
         submitted = st.form_submit_button("Add Task", type="primary", use_container_width=True)
 
@@ -159,7 +174,7 @@ st.subheader("🛠️ Manage Tasks")
 
 col_update, col_remove = st.columns(2)
 
-# ===================== UPDATE TASK (with Reassign + Preloaded Options) =====================
+# ===================== UPDATE TASK (Reassign) =====================
 with col_update:
     with st.container(border=True):
         st.markdown("#### ✏️ Update Task")
@@ -178,28 +193,19 @@ with col_update:
                 key="new_status"
             )
 
-            # ===================== REASSIGN WITH PRELOADED OPTIONS =====================
+            # === Reassign Dropdown ===
             current_assignee = task["assignee"]
+            assignee_options = TEAM_MEMBERS + ["Other (type custom)"]
 
-            # Build options list (alphabetically sorted)
-            assignee_options = TEAM_MEMBERS.copy()
-
-            # Add current assignee if it's not in the list (for legacy data)
-            if current_assignee not in assignee_options:
-                assignee_options = [current_assignee] + assignee_options
-
-            # Add "Other" option
-            full_options = assignee_options + ["Other (type custom)"]
-
-            # Determine default selection
-            if current_assignee in assignee_options:
-                default_index = assignee_options.index(current_assignee)
+            # Set default index
+            if current_assignee in TEAM_MEMBERS:
+                default_index = TEAM_MEMBERS.index(current_assignee)
             else:
-                default_index = len(assignee_options)  # "Other"
+                default_index = len(TEAM_MEMBERS)  # "Other"
 
             selected_reassign = st.selectbox(
                 "Reassign To",
-                options=full_options,
+                options=assignee_options,
                 index=default_index,
                 key="reassign_select"
             )
@@ -212,7 +218,6 @@ with col_update:
                 )
             else:
                 new_assignee = selected_reassign
-            # ===================== END REASSIGN =====================
 
             # Note
             new_note = st.text_area(
