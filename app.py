@@ -211,15 +211,19 @@ if "warp_token" not in st.session_state:
 
 with st.sidebar.expander("Warp Settings", expanded=not bool(st.session_state.warp_token)):
     st.caption(
-        "Token is read from `WARP_API_TOKEN`, `~/.sx-ai-auth/sx-ai-auth.json`, "
-        "or pasted below (session only)."
+        "Browser Warp does **not** always show `Authorization: Bearer`. "
+        "Copy the **Cookie** header (or just `CurrentUserV4=eyJ…`) from "
+        "Network → request → Headers → Request Headers."
     )
-    token_input = st.text_input(
-        "Warp API token",
+    st.caption(
+        "Also accepted: `WARP_API_TOKEN` / `WARP_COOKIE` env vars, or `warp_config.json`."
+    )
+    token_input = st.text_area(
+        "Warp Cookie or token",
         value=st.session_state.warp_token or "",
-        type="password",
         key="warp_token_input",
-        help="Bearer token for warpdrive.spacex.corp",
+        height=100,
+        help="Paste Cookie header or CurrentUserV4 JWT from DevTools",
     )
     if token_input != (st.session_state.warp_token or ""):
         st.session_state.warp_token = token_input
@@ -231,11 +235,27 @@ with st.sidebar.expander("Warp Settings", expanded=not bool(st.session_state.war
         help="When enabled, pulls clock-in / complete status from Warp each refresh.",
     )
 
+    if st.button("Test Warp connection", use_container_width=True):
+        test_client = get_warp_client()
+        if not test_client.is_authenticated:
+            st.error("Paste a Cookie / token first.")
+        else:
+            try:
+                # Lightweight call — any 200 means auth worked
+                test_client._get("/api/v1/operations/1")
+                st.success("Connected (auth accepted).")
+            except WarpError as exc:
+                msg = str(exc)
+                if "404" in msg or "Not found" in msg:
+                    st.success("Auth works (sample OP 1 not found — that’s OK).")
+                else:
+                    st.error(msg)
+
 client = get_warp_client()
 if client.is_authenticated:
-    st.sidebar.success("Warp token configured")
+    st.sidebar.success("Warp auth configured (cookie/token)")
 else:
-    st.sidebar.warning("No Warp token — links still work; status sync needs auth")
+    st.sidebar.warning("No Warp auth — links work; Import/Sync need Cookie")
 
 if st.sidebar.button("🔄 Sync all from Warp", use_container_width=True, type="primary"):
     if not client.is_authenticated:
