@@ -19,9 +19,14 @@ import requests
 WARP_BASE = os.environ.get("WARP_BASE_URL", "https://warpdrive.spacex.corp").rstrip("/")
 SHOP_FLOOR = f"{WARP_BASE}/ShopFloor"
 
-# Deep links into the Warp SPA (Shop Floor)
-WO_UI_URL = f"{WARP_BASE}/ShopFloor/#/work-orders/{{work_order_id}}"
-OP_UI_URL = f"{WARP_BASE}/ShopFloor/#/operations/{{operation_id}}"
+# Deep links into the Warp SPA (matches real browser URLs, e.g.
+# https://warpdrive.spacex.corp/shop-floor/work-order/4598043/operation/56330969)
+WO_UI_URL = f"{WARP_BASE}/shop-floor/work-order/{{work_order_id}}"
+OP_UI_URL = (
+    f"{WARP_BASE}/shop-floor/work-order/{{work_order_id}}/operation/{{operation_id}}"
+)
+# Fallback when only an OP id is known (WO id filled in after sync)
+OP_ONLY_UI_URL = f"{WARP_BASE}/shop-floor/operation/{{operation_id}}"
 
 AUTH_PATHS = [
     Path.home() / ".sx-ai-auth" / "sx-ai-auth.json",
@@ -77,6 +82,7 @@ class WarpOpSnapshot:
 
     operation_id: int
     work_order_id: Optional[int] = None
+    sequence_number: Optional[int] = None
     title: str = ""
     warp_status: str = ""
     tracker_status: str = "To Do"
@@ -93,10 +99,24 @@ class WarpOpSnapshot:
     wo_url: str = ""
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
+    def label(self) -> str:
+        """Human-facing WO # / OP # label (BaseID + sequence)."""
+        wo = self.work_order_base_id or (
+            str(self.work_order_id) if self.work_order_id else ""
+        )
+        if wo and self.sequence_number is not None:
+            return f"WO {wo} · OP {self.sequence_number}"
+        if wo:
+            return f"WO {wo}"
+        if self.sequence_number is not None:
+            return f"OP {self.sequence_number}"
+        return f"OP id {self.operation_id}"
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "operation_id": self.operation_id,
             "work_order_id": self.work_order_id,
+            "sequence_number": self.sequence_number,
             "title": self.title,
             "warp_status": self.warp_status,
             "tracker_status": self.tracker_status,
@@ -114,8 +134,14 @@ class WarpOpSnapshot:
         }
 
 
-def operation_url(operation_id: int | str) -> str:
-    return OP_UI_URL.format(operation_id=operation_id)
+def operation_url(
+    operation_id: int | str, work_order_id: int | str | None = None
+) -> str:
+    if work_order_id is not None and str(work_order_id).strip():
+        return OP_UI_URL.format(
+            work_order_id=work_order_id, operation_id=operation_id
+        )
+    return OP_ONLY_UI_URL.format(operation_id=operation_id)
 
 
 def work_order_url(work_order_id: int | str) -> str:
@@ -126,11 +152,23 @@ def parse_warp_ref(text: str) -> dict[str, Optional[int]]:
     """
     Extract operation_id / work_order_id from a pasted Warp URL, bare ID,
     or strings like 'OP 12345' / 'WO 67890'.
+
+    Real browser example:
+      .../shop-floor/work-order/4598043/operation/56330969/test-plan/...
     """
     result: dict[str, Optional[int]] = {"operation_id": None, "work_order_id": None}
     if not text or not str(text).strip():
         return result
     s = str(text).strip()
+
+    # Full path: /work-order/{wo}/operation/{op}
+    m = re.search(
+        r"/work-?orders?/(\d+)/operations?/(\d+)", s, re.IGNORECASE
+    )
+    if m:
+        result["work_order_id"] = int(m.group(1))
+        result["operation_id"] = int(m.group(2))
+        return result
 
     op_patterns = [
         r"/operations?/(\d+)",
@@ -432,9 +470,16 @@ class WarpClient:
         except (TypeError, ValueError):
             actual_f = None
 
+        seq_raw = op.get("SequenceNumber")
+        try:
+            seq_num = int(seq_raw) if seq_raw is not None else None
+        except (TypeError, ValueError):
+            seq_num = None
+
         return WarpOpSnapshot(
             operation_id=op_id,
             work_order_id=wo_id_int,
+            sequence_number=seq_num,
             title=str(op.get("Title") or ""),
             warp_status=warp_status,
             tracker_status=tracker_status,
@@ -447,7 +492,7 @@ class WarpClient:
             display_name=wo_display,
             work_order_status=wo_status,
             work_order_base_id=wo_base,
-            op_url=operation_url(op_id),
+            op_url=operation_url(op_id, wo_id_int),
             wo_url=work_order_url(wo_id_int) if wo_id_int else "",
             raw=op,
         )
@@ -462,34 +507,70 @@ class WarpClient:
     ) -> WarpOpSnapshot:
         """
         Resolve identifiers to an operation snapshot.
-        Prefer operation_id; else WO + optional sequence; else BaseID.
+
+        Preferred shop-floor path: BaseID (WO number) + SequenceNumber (OP number).
+        Also accepts internal WorkOrderID / OperationID when known.
         """
-        if operation_id:
+        if operation_id and not (base_id and sequence is not None):
+            # Direct OP id only when caller did not provide WO# + OP#
             return self.snapshot_operation(int(operation_id))
 
         wo_id = work_order_id
-        if not wo_id and base_id:
-            wo = self.get_work_order_by_base_id(base_id)
+        resolved_base = (str(base_id).strip() if base_id else "") or ""
+
+        if not wo_id and resolved_base:
+            wo = self.get_work_order_by_base_id(resolved_base)
             wo_id = wo.get("WorkOrderID")
+            if not resolved_base:
+                resolved_base = str(wo.get("BaseID") or resolved_base)
             if not wo_id:
-                raise WarpError(f"No work order found for BaseID={base_id}")
+                raise WarpError(
+                    f"No work order found for WO number (BaseID)={resolved_base}"
+                )
+
+        if not wo_id and operation_id:
+            return self.snapshot_operation(int(operation_id))
 
         if not wo_id:
-            raise WarpError("Need an Operation ID, Work Order ID, or Base ID")
+            raise WarpError(
+                "Enter a WO number (Base ID, e.g. 3462114) and OP number "
+                "(sequence, e.g. 62), or paste a Warp URL."
+            )
 
         wo_ops = self.get_work_order_operations(int(wo_id), available_to_work=False)
+        if not resolved_base:
+            resolved_base = str(wo_ops.get("BaseID") or "")
         operations = wo_ops.get("Operations") or []
         if not operations:
-            raise WarpError(f"Work order {wo_id} has no operations")
+            raise WarpError(
+                f"Work order {resolved_base or wo_id} has no operations"
+            )
 
         chosen = None
         if sequence is not None:
+            seq_int = int(sequence)
             for op in operations:
-                if op.get("SequenceNumber") == sequence:
+                try:
+                    op_seq = int(op.get("SequenceNumber"))
+                except (TypeError, ValueError):
+                    continue
+                if op_seq == seq_int:
                     chosen = op
                     break
             if chosen is None:
-                raise WarpError(f"No operation with sequence {sequence} on WO {wo_id}")
+                available = sorted(
+                    {
+                        int(o.get("SequenceNumber"))
+                        for o in operations
+                        if o.get("SequenceNumber") is not None
+                    },
+                    key=lambda x: x,
+                )
+                raise WarpError(
+                    f"No OP number {seq_int} on WO {resolved_base or wo_id}. "
+                    f"Available OP numbers: {available[:40]}"
+                    + ("…" if len(available) > 40 else "")
+                )
         else:
             # Prefer first non-complete op with clocked users, else first open, else first
             for op in operations:
@@ -523,6 +604,10 @@ def apply_snapshot_to_task(task: dict, snap: WarpOpSnapshot, *, force_status: bo
     task["warp_operation_id"] = snap.operation_id
     if snap.work_order_id:
         task["warp_work_order_id"] = snap.work_order_id
+    if snap.work_order_base_id:
+        task["warp_base_id"] = snap.work_order_base_id
+    if snap.sequence_number is not None:
+        task["warp_sequence"] = snap.sequence_number
     task["warp_op_url"] = snap.op_url
     if snap.wo_url:
         task["warp_wo_url"] = snap.wo_url
@@ -558,7 +643,7 @@ def apply_snapshot_to_task(task: dict, snap: WarpOpSnapshot, *, force_status: bo
             else ""
         )
         note = (
-            f"[{timestamp}] Warp sync OP {snap.operation_id}: "
+            f"[{timestamp}] Warp sync {snap.label()}: "
             f"{snap.warp_status or 'n/a'} → {snap.tracker_status}{clocked}"
         )
         existing = task.get("notes") or ""
