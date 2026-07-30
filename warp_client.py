@@ -203,12 +203,72 @@ def parse_warp_ref(text: str) -> dict[str, Optional[int]]:
     return result
 
 
+def extract_current_user_token(cookie_or_token: str) -> Optional[str]:
+    """
+    Pull CurrentUserV4 JWT out of a full Cookie header, if present.
+    Browser Warp often auth's via Cookie, not Authorization: Bearer.
+    """
+    if not cookie_or_token:
+        return None
+    m = re.search(
+        r"(?:^|;\s*)CurrentUserV4=([^;]+)",
+        cookie_or_token,
+        re.IGNORECASE,
+    )
+    if m:
+        return m.group(1).strip()
+    return None
+
+
+def normalize_auth_material(raw: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """
+    Accept several paste formats from DevTools:
+
+    - Bearer JWT / API token  → (token, None)
+    - Full Cookie header      → (CurrentUserV4 JWT if found, full cookie)
+    - CurrentUserV4=eyJ...    → (jwt, cookie fragment)
+
+    Returns (bearer_token, cookie_header).
+    """
+    if not raw or not str(raw).strip():
+        return None, None
+    s = str(raw).strip()
+    # Strip accidental "Bearer " / "Cookie: " prefixes
+    if s.lower().startswith("bearer "):
+        s = s[7:].strip()
+    if s.lower().startswith("cookie:"):
+        s = s[7:].strip()
+
+    # Full cookie blob from Request Headers
+    if "CurrentUserV4=" in s or "ASP.NET_SessionId=" in s or "; " in s and "=" in s:
+        jwt = extract_current_user_token(s)
+        # Prefer sending the whole cookie string (matches browser)
+        return jwt, s
+
+    # Single CurrentUserV4=...
+    if s.lower().startswith("currentuserv4="):
+        jwt = s.split("=", 1)[1].strip()
+        return jwt, f"CurrentUserV4={jwt}"
+
+    # Plain token / JWT
+    return s, None
+
+
 def load_token(explicit: Optional[str] = None) -> Optional[str]:
-    """Resolve a Warp Bearer token from arg, env, or local config files."""
+    """
+    Resolve Warp auth material (Bearer token and/or Cookie string).
+
+    Sources (first match wins): explicit arg, env, local config files.
+    """
     if explicit and explicit.strip():
         return explicit.strip()
 
-    for key in ("WARP_API_TOKEN", "WARPDRIVE_TOKEN", "WARP_TOKEN"):
+    for key in (
+        "WARP_API_TOKEN",
+        "WARPDRIVE_TOKEN",
+        "WARP_TOKEN",
+        "WARP_COOKIE",
+    ):
         val = os.environ.get(key)
         if val and val.strip():
             return val.strip()
@@ -218,7 +278,14 @@ def load_token(explicit: Optional[str] = None) -> Optional[str]:
             if not path.exists():
                 continue
             data = json.loads(path.read_text())
-            for key in ("WARP_API_TOKEN", "WARPDRIVE_TOKEN", "WARP_TOKEN", "token"):
+            for key in (
+                "WARP_API_TOKEN",
+                "WARPDRIVE_TOKEN",
+                "WARP_TOKEN",
+                "WARP_COOKIE",
+                "token",
+                "cookie",
+            ):
                 val = data.get(key)
                 if val and str(val).strip():
                     return str(val).strip()
@@ -279,7 +346,6 @@ class WarpClient:
         base_url: str = WARP_BASE,
         timeout: float = 20.0,
     ):
-        self.token = load_token(token)
         self.base_url = base_url.rstrip("/")
         self.shop_floor = f"{self.base_url}/ShopFloor"
         self.timeout = timeout
@@ -290,25 +356,36 @@ class WarpClient:
                 "User-Agent": "MM-OPs-Tracker/1.0",
             }
         )
-        if self.token:
-            self.session.headers["Authorization"] = f"Bearer {self.token}"
+        # bearer_token and/or cookie (browser Warp uses Cookie, not always Bearer)
+        self.token: Optional[str] = None
+        self.cookie: Optional[str] = None
+        self._apply_auth(load_token(token))
+
+    def _apply_auth(self, raw: Optional[str]) -> None:
+        self.session.headers.pop("Authorization", None)
+        self.session.headers.pop("Cookie", None)
+        bearer, cookie = normalize_auth_material(raw)
+        self.token = bearer
+        self.cookie = cookie
+        if cookie:
+            self.session.headers["Cookie"] = cookie
+        if bearer:
+            # Also send Bearer — some endpoints accept CurrentUserV4 JWT this way
+            self.session.headers["Authorization"] = f"Bearer {bearer}"
 
     @property
     def is_authenticated(self) -> bool:
-        return bool(self.token)
+        return bool(self.token or self.cookie)
 
     def set_token(self, token: str) -> None:
-        self.token = token.strip() if token else None
-        if self.token:
-            self.session.headers["Authorization"] = f"Bearer {self.token}"
-        else:
-            self.session.headers.pop("Authorization", None)
+        self._apply_auth(token.strip() if token else None)
 
     def _get(self, path: str, params: Optional[dict] = None) -> Any:
-        if not self.token:
+        if not self.is_authenticated:
             raise WarpError(
-                "No Warp API token configured. Set WARP_API_TOKEN or paste a token "
-                "in the sidebar (Warp Settings)."
+                "No Warp auth configured. In Chrome DevTools Network → a 200 request → "
+                "Headers → Request Headers → copy the entire Cookie value "
+                "(or CurrentUserV4=eyJ...) and paste it under Warp Settings."
             )
         url = f"{self.shop_floor}{path}"
         try:
@@ -318,8 +395,9 @@ class WarpClient:
 
         if resp.status_code in (401, 403):
             raise WarpError(
-                "Warp authentication failed (401/403). Token may be missing or expired. "
-                "Refresh via `sx-ai-sandbox setup warp --re-auth` or paste a new token."
+                "Warp authentication failed (401/403). Cookie/token expired — "
+                "log into Warp in the browser, copy a fresh Cookie (or CurrentUserV4) "
+                "from Network → Request Headers, and paste it again in Warp Settings."
             )
         if resp.status_code == 404:
             raise WarpError(f"Not found in Warp: {path}")
