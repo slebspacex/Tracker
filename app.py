@@ -42,6 +42,8 @@ def ensure_warp_fields(task: dict) -> dict:
     """Backfill Warp fields on older task records."""
     task.setdefault("warp_operation_id", None)
     task.setdefault("warp_work_order_id", None)
+    task.setdefault("warp_base_id", "")  # human WO number (BaseID), e.g. 3462114
+    task.setdefault("warp_sequence", None)  # human OP number (SequenceNumber), e.g. 62
     task.setdefault("warp_op_url", "")
     task.setdefault("warp_wo_url", "")
     task.setdefault("warp_status", "")
@@ -51,6 +53,40 @@ def ensure_warp_fields(task: dict) -> dict:
     return task
 
 
+def task_is_warp_linked(task: dict) -> bool:
+    return bool(
+        task.get("warp_operation_id")
+        or task.get("warp_work_order_id")
+        or task.get("warp_base_id")
+        or task.get("warp_sequence") is not None
+    )
+
+
+def warp_display_label(task: dict) -> str:
+    """Show WO # + OP # when known (what techs type), not internal IDs."""
+    base = str(task.get("warp_base_id") or "").strip()
+    seq = task.get("warp_sequence")
+    if base and seq is not None and str(seq).strip() != "":
+        return f"WO {base} · OP {seq}"
+    if base:
+        return f"WO {base}"
+    if seq is not None and str(seq).strip() != "":
+        return f"OP {seq}"
+    op = task.get("warp_operation_id")
+    wo = task.get("warp_work_order_id")
+    if op:
+        try:
+            return f"OP id {int(op)}"
+        except (TypeError, ValueError):
+            return f"OP id {op}"
+    if wo:
+        try:
+            return f"WO id {int(wo)}"
+        except (TypeError, ValueError):
+            return f"WO id {wo}"
+    return ""
+
+
 def get_warp_client() -> WarpClient:
     token = st.session_state.get("warp_token") or load_token()
     return WarpClient(token=token)
@@ -58,15 +94,30 @@ def get_warp_client() -> WarpClient:
 
 def sync_task_from_warp(task: dict, client: WarpClient) -> tuple[bool, str]:
     """Sync one task. Returns (changed, message)."""
+    ensure_warp_fields(task)
     op_id = task.get("warp_operation_id")
     wo_id = task.get("warp_work_order_id")
-    if not op_id and not wo_id:
-        return False, "No Warp OP/WO linked"
+    base_id = str(task.get("warp_base_id") or "").strip() or None
+    seq = task.get("warp_sequence")
+    try:
+        seq_int = int(seq) if seq is not None and str(seq).strip() != "" else None
+    except (TypeError, ValueError):
+        seq_int = None
+
+    if not op_id and not wo_id and not base_id:
+        return False, "No Warp WO/OP linked"
 
     try:
+        # Prefer human WO # + OP #; fall back to resolved internal IDs
         snap = client.lookup_and_snapshot(
-            operation_id=int(op_id) if op_id else None,
-            work_order_id=int(wo_id) if wo_id and not op_id else None,
+            base_id=base_id,
+            sequence=seq_int,
+            operation_id=(
+                int(op_id)
+                if op_id and not (base_id and seq_int is not None)
+                else None
+            ),
+            work_order_id=int(wo_id) if wo_id and not base_id else None,
         )
         changes = apply_snapshot_to_task(task, snap, force_status=True)
         task["last_updated"] = datetime.now().isoformat()
@@ -87,7 +138,7 @@ def sync_all_linked_tasks(tasks: list, client: WarpClient) -> tuple[int, list[st
         ensure_warp_fields(task)
         if not task.get("warp_auto_sync", True):
             continue
-        if not task.get("warp_operation_id") and not task.get("warp_work_order_id"):
+        if not task_is_warp_linked(task):
             continue
         changed, msg = sync_task_from_warp(task, client)
         label = f"#{task['id']} {task.get('name', '')}"
@@ -210,8 +261,7 @@ if (
     linked = [
         t
         for t in tasks
-        if t.get("warp_auto_sync", True)
-        and (t.get("warp_operation_id") or t.get("warp_work_order_id"))
+        if t.get("warp_auto_sync", True) and task_is_warp_linked(t)
     ]
     if linked:
         n, _ = sync_all_linked_tasks(tasks, client)
@@ -228,7 +278,7 @@ done_today = sum(
 )
 in_progress = sum(1 for t in tasks if t["status"] == "In Progress")
 open_tasks = len([t for t in tasks if t["status"] in ["To Do", "In Progress"]])
-linked_count = sum(1 for t in tasks if t.get("warp_operation_id") or t.get("warp_work_order_id"))
+linked_count = sum(1 for t in tasks if task_is_warp_linked(t))
 
 col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("✅ Done Today", done_today)
@@ -283,33 +333,26 @@ with tab_current:
         )
 
         def warp_link_label(row):
-            op = row.get("warp_operation_id")
-            wo = row.get("warp_work_order_id")
-            if op:
-                return f"OP {int(op)}"
-            if wo and not (isinstance(wo, float) and pd.isna(wo)):
-                try:
-                    return f"WO {int(wo)}"
-                except (TypeError, ValueError):
-                    return ""
-            return ""
+            return warp_display_label(row.to_dict() if hasattr(row, "to_dict") else dict(row))
 
         def warp_href(row):
             url = row.get("warp_op_url") or ""
-            if url:
+            if url and not (isinstance(url, float) and pd.isna(url)):
                 return url
             op = row.get("warp_operation_id")
-            if op and not (isinstance(op, float) and pd.isna(op)):
-                try:
-                    return operation_url(int(op))
-                except (TypeError, ValueError):
-                    pass
             wo = row.get("warp_work_order_id")
-            if wo and not (isinstance(wo, float) and pd.isna(wo)):
-                try:
-                    return work_order_url(int(wo))
-                except (TypeError, ValueError):
-                    pass
+            try:
+                op_i = int(op) if op is not None and not (isinstance(op, float) and pd.isna(op)) else None
+            except (TypeError, ValueError):
+                op_i = None
+            try:
+                wo_i = int(wo) if wo is not None and not (isinstance(wo, float) and pd.isna(wo)) else None
+            except (TypeError, ValueError):
+                wo_i = None
+            if op_i:
+                return operation_url(op_i, wo_i)
+            if wo_i:
+                return work_order_url(wo_i)
             return ""
 
         df["Warp"] = df.apply(warp_link_label, axis=1)
@@ -421,25 +464,31 @@ with tab_manage:
                 task = next(t for t in tasks if t["id"] == selected_id)
                 ensure_warp_fields(task)
 
-                # Warp link summary
-                if task.get("warp_operation_id") or task.get("warp_work_order_id"):
-                    parts = []
-                    if task.get("warp_operation_id"):
-                        parts.append(
-                            f"[OP {task['warp_operation_id']}]"
-                            f"({task.get('warp_op_url') or operation_url(task['warp_operation_id'])})"
+                # Warp link summary (human WO # / OP #)
+                if task_is_warp_linked(task):
+                    label = warp_display_label(task)
+                    href = task.get("warp_op_url") or (
+                        operation_url(
+                            task["warp_operation_id"], task.get("warp_work_order_id")
                         )
-                    if task.get("warp_work_order_id"):
-                        parts.append(
-                            f"[WO {task['warp_work_order_id']}]"
-                            f"({task.get('warp_wo_url') or work_order_url(task['warp_work_order_id'])})"
+                        if task.get("warp_operation_id")
+                        else (
+                            work_order_url(task["warp_work_order_id"])
+                            if task.get("warp_work_order_id")
+                            else ""
                         )
-                    warp_bits = " · ".join(parts)
+                    )
+                    if href:
+                        st.markdown(f"🔗 [{label}]({href})")
+                    else:
+                        st.markdown(f"🔗 {label}")
+                    extra = []
                     if task.get("warp_status"):
-                        warp_bits += f" · Warp status: **{task['warp_status']}**"
+                        extra.append(f"Warp status: **{task['warp_status']}**")
                     if task.get("warp_clocked_in"):
-                        warp_bits += f" · Clocked in: {', '.join(task['warp_clocked_in'])}"
-                    st.markdown(f"🔗 {warp_bits}")
+                        extra.append(f"Clocked in: {', '.join(task['warp_clocked_in'])}")
+                    if extra:
+                        st.caption(" · ".join(extra))
                     if task.get("warp_last_sync"):
                         st.caption(f"Last Warp sync: {task['warp_last_sync']}")
 
@@ -481,9 +530,7 @@ with tab_manage:
                         save_tasks(tasks)
                         st.rerun()
                 with c2:
-                    can_sync = bool(
-                        task.get("warp_operation_id") or task.get("warp_work_order_id")
-                    )
+                    can_sync = task_is_warp_linked(task)
                     if st.button(
                         "🔄 Sync from Warp",
                         use_container_width=True,
@@ -537,18 +584,30 @@ with tab_add:
             with col_b:
                 assignee = st.text_input("Assignee", value="Unassigned")
 
-            st.markdown("**Optional Warp link**")
+            st.markdown("**Optional Warp link** (WO number + OP number from Shop Floor)")
+            st.caption(
+                "Example from the Warp header **3462114 | SUP OP 62**: "
+                "WO number = `3462114`, OP number = `62` (not the long internal IDs)."
+            )
             col_w1, col_w2, col_w3 = st.columns(3)
             with col_w1:
-                warp_ref = st.text_input(
-                    "Warp OP / URL",
-                    placeholder="OP ID, WO ID, or Warp URL",
-                    help="Paste a Warp operation URL or numeric OP/WO id",
+                warp_wo_num = st.text_input(
+                    "WO number",
+                    placeholder="e.g. 3462114",
+                    help="Base ID shown as SHOP FLOOR ####### in Warp",
                 )
             with col_w2:
-                warp_op_id = st.text_input("Operation ID", placeholder="e.g. 65105243")
+                warp_op_num = st.text_input(
+                    "OP number",
+                    placeholder="e.g. 62",
+                    help="Sequence on the left rail (10, 20, 62…)",
+                )
             with col_w3:
-                warp_wo_id = st.text_input("Work Order ID", placeholder="e.g. 9481728")
+                warp_ref = st.text_input(
+                    "Or paste Warp URL",
+                    placeholder="…/work-order/…/operation/…",
+                    help="Optional — we still prefer WO # + OP # above",
+                )
 
             auto_sync = st.checkbox(
                 "Auto-sync status from Warp (clock-in → In Progress, complete → Done)",
@@ -565,25 +624,29 @@ with tab_add:
             )
 
             if submitted:
-                if not task_name.strip() and not (warp_ref or warp_op_id or warp_wo_id):
-                    st.warning("Task name or a Warp reference is required.")
+                base_id = warp_wo_num.strip() or None
+                seq = int(warp_op_num) if warp_op_num.strip().isdigit() else None
+                parsed = parse_warp_ref(warp_ref) if warp_ref else {}
+                # URL may only give internal IDs; still store them as fallback
+                op_id = parsed.get("operation_id")
+                wo_id = parsed.get("work_order_id")
+
+                if not task_name.strip() and not (base_id or seq is not None or op_id or wo_id):
+                    st.warning("Task name or a Warp WO number / OP number is required.")
                 else:
-                    parsed = parse_warp_ref(warp_ref) if warp_ref else {}
-                    op_id = None
-                    wo_id = None
-                    if warp_op_id.strip().isdigit():
-                        op_id = int(warp_op_id.strip())
-                    elif parsed.get("operation_id"):
-                        op_id = parsed["operation_id"]
-                    if warp_wo_id.strip().isdigit():
-                        wo_id = int(warp_wo_id.strip())
-                    elif parsed.get("work_order_id"):
-                        wo_id = parsed["work_order_id"]
+                    default_name = task_name.strip()
+                    if not default_name:
+                        if base_id and seq is not None:
+                            default_name = f"WO {base_id} · OP {seq}"
+                        elif base_id:
+                            default_name = f"WO {base_id}"
+                        else:
+                            default_name = "New task"
 
                     new_id = max([t["id"] for t in tasks], default=0) + 1
                     new_task = {
                         "id": new_id,
-                        "name": task_name.strip() or (f"OP {op_id}" if op_id else "New task"),
+                        "name": default_name,
                         "assignee": assignee.strip() or "Unassigned",
                         "status": "To Do",
                         "notes": "",
@@ -591,7 +654,9 @@ with tab_add:
                         "last_updated": datetime.now().isoformat(),
                         "warp_operation_id": op_id,
                         "warp_work_order_id": wo_id,
-                        "warp_op_url": operation_url(op_id) if op_id else "",
+                        "warp_base_id": base_id or "",
+                        "warp_sequence": seq,
+                        "warp_op_url": operation_url(op_id, wo_id) if op_id else "",
                         "warp_wo_url": work_order_url(wo_id) if wo_id else "",
                         "warp_status": "",
                         "warp_clocked_in": [],
@@ -599,10 +664,14 @@ with tab_add:
                         "warp_auto_sync": auto_sync,
                     }
 
-                    if (op_id or wo_id) and pull_now and client.is_authenticated:
+                    can_lookup = base_id or op_id or wo_id
+                    if can_lookup and pull_now and client.is_authenticated:
                         try:
                             snap = client.lookup_and_snapshot(
-                                operation_id=op_id, work_order_id=wo_id if not op_id else None
+                                base_id=base_id,
+                                sequence=seq,
+                                operation_id=op_id if not (base_id and seq is not None) else None,
+                                work_order_id=wo_id if not base_id else None,
                             )
                             apply_snapshot_to_task(new_task, snap, force_status=True)
                             if not task_name.strip() and snap.title:
@@ -635,24 +704,29 @@ with tab_warp:
                 link_task = next(t for t in tasks if t["id"] == link_id)
                 ensure_warp_fields(link_task)
 
-                link_ref = st.text_input(
-                    "Paste Warp URL or OP/WO id",
-                    key="link_ref",
-                    placeholder="https://warpdrive.spacex.corp/ShopFloor/#/operations/123…",
+                st.caption(
+                    "Use the numbers from the Warp header, e.g. **3462114** and OP **62**."
                 )
-                c_op, c_wo = st.columns(2)
-                with c_op:
-                    link_op = st.text_input(
-                        "Operation ID",
-                        value=str(link_task.get("warp_operation_id") or ""),
-                        key="link_op",
-                    )
+                c_wo, c_op = st.columns(2)
                 with c_wo:
-                    link_wo = st.text_input(
-                        "Work Order ID",
-                        value=str(link_task.get("warp_work_order_id") or ""),
-                        key="link_wo",
+                    link_wo_num = st.text_input(
+                        "WO number",
+                        value=str(link_task.get("warp_base_id") or ""),
+                        key="link_wo_num",
+                        placeholder="e.g. 3462114",
                     )
+                with c_op:
+                    link_op_num = st.text_input(
+                        "OP number",
+                        value=str(link_task.get("warp_sequence") or ""),
+                        key="link_op_num",
+                        placeholder="e.g. 62",
+                    )
+                link_ref = st.text_input(
+                    "Or paste Warp URL (optional)",
+                    key="link_ref",
+                    placeholder="…/shop-floor/work-order/…/operation/…",
+                )
                 link_auto = st.checkbox(
                     "Auto-sync this task from Warp",
                     value=link_task.get("warp_auto_sync", True),
@@ -663,25 +737,35 @@ with tab_warp:
                 )
 
                 if st.button("Save Warp link", type="primary", use_container_width=True):
+                    base_id = link_wo_num.strip() or None
+                    seq = int(link_op_num) if link_op_num.strip().isdigit() else None
                     parsed = parse_warp_ref(link_ref) if link_ref else {}
-                    op_id = (
-                        int(link_op)
-                        if link_op.strip().isdigit()
-                        else parsed.get("operation_id")
-                    )
-                    wo_id = (
-                        int(link_wo)
-                        if link_wo.strip().isdigit()
-                        else parsed.get("work_order_id")
-                    )
-                    link_task["warp_operation_id"] = op_id
-                    link_task["warp_work_order_id"] = wo_id
-                    link_task["warp_op_url"] = operation_url(op_id) if op_id else ""
-                    link_task["warp_wo_url"] = work_order_url(wo_id) if wo_id else ""
+                    if base_id:
+                        link_task["warp_base_id"] = base_id
+                    if seq is not None:
+                        link_task["warp_sequence"] = seq
+                    # Keep any internal IDs from a pasted URL until sync resolves them
+                    if parsed.get("operation_id"):
+                        link_task["warp_operation_id"] = parsed["operation_id"]
+                    if parsed.get("work_order_id"):
+                        link_task["warp_work_order_id"] = parsed["work_order_id"]
+                    if link_task.get("warp_operation_id"):
+                        link_task["warp_op_url"] = operation_url(
+                            link_task["warp_operation_id"],
+                            link_task.get("warp_work_order_id"),
+                        )
+                    if link_task.get("warp_work_order_id"):
+                        link_task["warp_wo_url"] = work_order_url(
+                            link_task["warp_work_order_id"]
+                        )
                     link_task["warp_auto_sync"] = link_auto
                     link_task["last_updated"] = datetime.now().isoformat()
 
-                    if fetch_on_link and (op_id or wo_id) and client.is_authenticated:
+                    if (
+                        fetch_on_link
+                        and task_is_warp_linked(link_task)
+                        and client.is_authenticated
+                    ):
                         changed, msg = sync_task_from_warp(link_task, client)
                         save_tasks(tasks)
                         st.success(f"Linked. {msg}")
@@ -696,14 +780,26 @@ with tab_warp:
         with st.container(border=True):
             st.markdown("#### Import operation from Warp")
             st.caption(
-                "Look up an OP by ID (or WO + sequence) and create a tracker task "
-                "with live status and a deep link."
+                "Type the **WO number** and **OP number** from Shop Floor "
+                "(e.g. WO `3462114`, OP `62` on the left rail)."
             )
-            imp_op = st.text_input("Operation ID", key="imp_op")
-            imp_wo = st.text_input("Work Order ID (if no OP)", key="imp_wo")
-            imp_seq = st.text_input("Sequence # (optional with WO)", key="imp_seq")
+            imp_wo = st.text_input(
+                "WO number",
+                key="imp_wo",
+                placeholder="e.g. 3462114",
+                help="Base ID — the number next to SHOP FLOOR in the header",
+            )
+            imp_op = st.text_input(
+                "OP number",
+                key="imp_op",
+                placeholder="e.g. 62",
+                help="Sequence number (10, 20, 62…) — not the long Operation ID in the URL",
+            )
             imp_assignee = st.text_input(
-                "Assignee override", value="", key="imp_assignee", placeholder="Leave blank to use clocked-in user"
+                "Assignee override",
+                value="",
+                key="imp_assignee",
+                placeholder="Leave blank to use clocked-in user",
             )
 
             if st.button(
@@ -714,14 +810,16 @@ with tab_warp:
             ):
                 if not client.is_authenticated:
                     st.error("Configure Warp token in the sidebar first.")
+                elif not imp_wo.strip():
+                    st.error("WO number is required.")
+                elif not imp_op.strip().isdigit():
+                    st.error("OP number is required (e.g. 62).")
                 else:
                     try:
-                        op_id = int(imp_op) if imp_op.strip().isdigit() else None
-                        wo_id = int(imp_wo) if imp_wo.strip().isdigit() else None
-                        seq = int(imp_seq) if imp_seq.strip().isdigit() else None
+                        base_id = imp_wo.strip()
+                        seq = int(imp_op.strip())
                         snap = client.lookup_and_snapshot(
-                            operation_id=op_id,
-                            work_order_id=wo_id if not op_id else None,
+                            base_id=base_id,
                             sequence=seq,
                         )
                         # Avoid duplicate OP links
@@ -730,27 +828,39 @@ with tab_warp:
                                 t
                                 for t in tasks
                                 if t.get("warp_operation_id") == snap.operation_id
+                                or (
+                                    str(t.get("warp_base_id") or "") == base_id
+                                    and t.get("warp_sequence") == seq
+                                )
                             ),
                             None,
                         )
                         if existing:
                             st.warning(
-                                f"OP {snap.operation_id} already linked to task #{existing['id']}. "
+                                f"{snap.label()} already linked to task #{existing['id']}. "
                                 "Use Sync instead."
                             )
                         else:
                             new_id = max([t["id"] for t in tasks], default=0) + 1
                             new_task = {
                                 "id": new_id,
-                                "name": snap.title or f"OP {snap.operation_id}",
+                                "name": snap.title or snap.label(),
                                 "assignee": imp_assignee.strip()
-                                or (snap.clocked_in_users[0] if snap.clocked_in_users else "Unassigned"),
+                                or (
+                                    snap.clocked_in_users[0]
+                                    if snap.clocked_in_users
+                                    else "Unassigned"
+                                ),
                                 "status": snap.tracker_status,
                                 "notes": "",
                                 "created": datetime.now().isoformat(),
                                 "last_updated": datetime.now().isoformat(),
                                 "warp_operation_id": snap.operation_id,
                                 "warp_work_order_id": snap.work_order_id,
+                                "warp_base_id": snap.work_order_base_id or base_id,
+                                "warp_sequence": snap.sequence_number
+                                if snap.sequence_number is not None
+                                else seq,
                                 "warp_op_url": snap.op_url,
                                 "warp_wo_url": snap.wo_url,
                                 "warp_status": snap.warp_status,
@@ -762,7 +872,7 @@ with tab_warp:
                             tasks.append(new_task)
                             save_tasks(tasks)
                             st.success(
-                                f"Imported OP {snap.operation_id} as task #{new_id} "
+                                f"Imported {snap.label()} as task #{new_id} "
                                 f"({snap.tracker_status})"
                             )
                             st.rerun()
@@ -772,6 +882,14 @@ with tab_warp:
     st.divider()
     st.markdown(
         """
+**How to enter Warp OPs**
+
+| What you type | Example | Where it is in Warp |
+|---|---|---|
+| **WO number** | `3462114` | Header: `SHOP FLOOR 3462114` (Base ID) |
+| **OP number** | `62` | Left rail sequence / `SUP OP 62` |
+| ~~Operation ID~~ | ~~`56330969`~~ | Long number in the URL — **not needed** |
+
 **How status sync works**
 
 | Warp signal | Tracker status |
@@ -781,10 +899,8 @@ with tab_warp:
 | Open quality calls, or On Hold / Blocked | **Blocked** |
 | Unstarted / Ready / no activity | **To Do** |
 
-- **Open in Warp** column links straight to the operation (or work order).
+- **Open in Warp** uses the real Shop Floor URL after sync.
 - **Sync all from Warp** (sidebar) refreshes every linked task.
-- Auto-sync on load keeps clock-in / completion reflected without manual updates.
-- Auth: set `WARP_API_TOKEN` in the environment, put it in `warp_config.json` as
-  `{"WARP_API_TOKEN": "..."}`, or paste it under **Warp Settings**.
+- Auth: paste token under **Warp Settings**, or set `WARP_API_TOKEN`.
 """
     )
