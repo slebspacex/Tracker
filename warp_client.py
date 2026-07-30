@@ -1,8 +1,11 @@
 """
-Warp (Warpdrive) Shop Floor client for MM OPs Tracker.
+Warp Shop Floor client for MM OPs Tracker.
 
-Reads operation / work-order status and builds deep links so the tracker
-can mirror clock-in and completion state from Warp.
+Design rules (keep simple, avoid past bugs):
+  - Operation ID is the only required identifier to sync.
+  - Work Order ID is taken from the API response for that OP (never guessed).
+  - Never auto-pick an OP from a work order.
+  - Deep links use WO + OP from API data.
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -19,273 +23,63 @@ import requests
 WARP_BASE = os.environ.get("WARP_BASE_URL", "https://warpdrive.spacex.corp").rstrip("/")
 SHOP_FLOOR = f"{WARP_BASE}/ShopFloor"
 
-# Deep links into the Warp SPA (matches real browser URLs, e.g.
-# https://warpdrive.spacex.corp/shop-floor/work-order/4598043/operation/56330969)
-WO_UI_URL = f"{WARP_BASE}/shop-floor/work-order/{{work_order_id}}"
-OP_UI_URL = (
-    f"{WARP_BASE}/shop-floor/work-order/{{work_order_id}}/operation/{{operation_id}}"
-)
-# Fallback when only an OP id is known (WO id filled in after sync)
-OP_ONLY_UI_URL = f"{WARP_BASE}/shop-floor/operation/{{operation_id}}"
-
 AUTH_PATHS = [
     Path.home() / ".sx-ai-auth" / "sx-ai-auth.json",
     Path(__file__).resolve().parent / "warp_config.json",
 ]
 
-# Warp operation Status strings we have seen in Shop Floor MES
-DONE_STATUSES = {
-    "complete",
-    "completed",
-    "closed",
-    "done",
-    "cancelled",
-    "canceled",
-    "scrapped",
-}
-IN_PROGRESS_STATUSES = {
-    "running",
-    "in progress",
-    "inprogress",
-    "in-progress",
-    "started",
-    "active",
-    "open",
-}
-BLOCKED_STATUSES = {
-    "blocked",
-    "on hold",
-    "onhold",
-    "on-hold",
-    "hold",
-    "suspended",
-}
-TODO_STATUSES = {
-    "unstarted",
-    "not started",
-    "notstarted",
-    "pending",
-    "ready",
-    "available",
-    "new",
-    "released",
-}
+# MES single-letter status codes (Shop Floor) + common words
+DONE = {"c", "complete", "completed", "closed", "done", "x", "cancelled", "canceled", "scrapped"}
+IN_PROGRESS = {"s", "running", "in progress", "inprogress", "in-progress", "started", "active", "w"}
+BLOCKED = {"h", "blocked", "hold", "on hold", "onhold", "on-hold", "suspended"}
+TODO = {"u", "r", "unstarted", "not started", "notstarted", "pending", "ready", "released", "new"}
 
 
 class WarpError(Exception):
-    """Raised when a Warp API call fails."""
+    pass
 
 
 @dataclass
-class WarpOpSnapshot:
-    """Normalized view of a Warp operation for the tracker."""
-
+class OpSnapshot:
     operation_id: int
     work_order_id: Optional[int] = None
-    sequence_number: Optional[int] = None
     title: str = ""
     warp_status: str = ""
     tracker_status: str = "To Do"
-    clocked_in_users: list[str] = field(default_factory=list)
-    open_quality_calls: list[int] = field(default_factory=list)
+    clocked_in: list[str] = field(default_factory=list)
     complete_qty: Optional[float] = None
     planned_qty: Optional[float] = None
-    actual_hours: Optional[float] = None
-    shop_resource: str = ""
-    display_name: str = ""
-    work_order_status: str = ""
-    work_order_base_id: str = ""
+    available_qty: Optional[float] = None
     op_url: str = ""
     wo_url: str = ""
-    raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
-    def label(self) -> str:
-        """Human-facing WO # / OP # label (BaseID + sequence)."""
-        wo = self.work_order_base_id or (
-            str(self.work_order_id) if self.work_order_id else ""
-        )
-        if wo and self.sequence_number is not None:
-            return f"WO {wo} · OP {self.sequence_number}"
-        if wo:
-            return f"WO {wo}"
-        if self.sequence_number is not None:
-            return f"OP {self.sequence_number}"
-        return f"OP id {self.operation_id}"
-
-    def to_dict(self) -> dict[str, Any]:
+    def to_task_fields(self) -> dict[str, Any]:
         return {
-            "operation_id": self.operation_id,
-            "work_order_id": self.work_order_id,
-            "sequence_number": self.sequence_number,
-            "title": self.title,
+            "warp_operation_id": self.operation_id,
+            "warp_work_order_id": self.work_order_id,
             "warp_status": self.warp_status,
-            "tracker_status": self.tracker_status,
-            "clocked_in_users": self.clocked_in_users,
-            "open_quality_calls": self.open_quality_calls,
-            "complete_qty": self.complete_qty,
-            "planned_qty": self.planned_qty,
-            "actual_hours": self.actual_hours,
-            "shop_resource": self.shop_resource,
-            "display_name": self.display_name,
-            "work_order_status": self.work_order_status,
-            "work_order_base_id": self.work_order_base_id,
-            "op_url": self.op_url,
-            "wo_url": self.wo_url,
+            "warp_clocked_in": list(self.clocked_in),
+            "warp_op_url": self.op_url,
+            "warp_wo_url": self.wo_url,
+            "warp_last_sync": datetime.now().isoformat(),
         }
 
 
-def operation_url(
-    operation_id: int | str, work_order_id: int | str | None = None
-) -> str:
-    if work_order_id is not None and str(work_order_id).strip():
-        return OP_UI_URL.format(
-            work_order_id=work_order_id, operation_id=operation_id
-        )
-    return OP_ONLY_UI_URL.format(operation_id=operation_id)
-
-
-def work_order_url(work_order_id: int | str) -> str:
-    return WO_UI_URL.format(work_order_id=work_order_id)
-
-
-def parse_warp_ref(text: str) -> dict[str, Optional[int]]:
-    """
-    Extract operation_id / work_order_id from a pasted Warp URL, bare ID,
-    or strings like 'OP 12345' / 'WO 67890'.
-
-    Real browser example:
-      .../shop-floor/work-order/4598043/operation/56330969/test-plan/...
-    """
-    result: dict[str, Optional[int]] = {"operation_id": None, "work_order_id": None}
-    if not text or not str(text).strip():
-        return result
-    s = str(text).strip()
-
-    # Full path: /work-order/{wo}/operation/{op}
-    m = re.search(
-        r"/work-?orders?/(\d+)/operations?/(\d+)", s, re.IGNORECASE
-    )
-    if m:
-        result["work_order_id"] = int(m.group(1))
-        result["operation_id"] = int(m.group(2))
-        return result
-
-    op_patterns = [
-        r"/operations?/(\d+)",
-        r"[#&?]operation(?:Id|ID)?[=/](\d+)",
-        r"\bOP[:\s#-]*(\d+)\b",
-        r"\boperation[:\s#-]*(\d+)\b",
-    ]
-    wo_patterns = [
-        r"/work-?orders?/(\d+)",
-        r"[#&?]workOrder(?:Id|ID)?[=/](\d+)",
-        r"\bWO[:\s#-]*(\d+)\b",
-        r"\bwork[\s-]?order[:\s#-]*(\d+)\b",
-    ]
-
-    for pat in op_patterns:
-        m = re.search(pat, s, re.IGNORECASE)
-        if m:
-            result["operation_id"] = int(m.group(1))
-            break
-
-    for pat in wo_patterns:
-        m = re.search(pat, s, re.IGNORECASE)
-        if m:
-            result["work_order_id"] = int(m.group(1))
-            break
-
-    # Bare numeric ID — treat as operation ID if nothing else matched
-    if result["operation_id"] is None and result["work_order_id"] is None:
-        if re.fullmatch(r"\d+", s):
-            result["operation_id"] = int(s)
-
-    return result
-
-
-def extract_current_user_token(cookie_or_token: str) -> Optional[str]:
-    """
-    Pull CurrentUserV4 JWT out of a full Cookie header, if present.
-    Browser Warp often auth's via Cookie, not Authorization: Bearer.
-    """
-    if not cookie_or_token:
-        return None
-    m = re.search(
-        r"(?:^|;\s*)CurrentUserV4=([^;]+)",
-        cookie_or_token,
-        re.IGNORECASE,
-    )
-    if m:
-        return m.group(1).strip()
-    return None
-
-
-def normalize_auth_material(raw: Optional[str]) -> tuple[Optional[str], Optional[str]]:
-    """
-    Accept several paste formats from DevTools:
-
-    - Bearer JWT / API token  → (token, None)
-    - Full Cookie header      → (CurrentUserV4 JWT if found, full cookie)
-    - CurrentUserV4=eyJ...    → (jwt, cookie fragment)
-
-    Returns (bearer_token, cookie_header).
-    """
-    if not raw or not str(raw).strip():
-        return None, None
-    s = str(raw).strip()
-    # Strip accidental "Bearer " / "Cookie: " prefixes
-    if s.lower().startswith("bearer "):
-        s = s[7:].strip()
-    if s.lower().startswith("cookie:"):
-        s = s[7:].strip()
-
-    # Full cookie blob from Request Headers
-    if "CurrentUserV4=" in s or "ASP.NET_SessionId=" in s or "; " in s and "=" in s:
-        jwt = extract_current_user_token(s)
-        # Prefer sending the whole cookie string (matches browser)
-        return jwt, s
-
-    # Single CurrentUserV4=...
-    if s.lower().startswith("currentuserv4="):
-        jwt = s.split("=", 1)[1].strip()
-        return jwt, f"CurrentUserV4={jwt}"
-
-    # Plain token / JWT
-    return s, None
-
+# ---------- auth ----------
 
 def load_token(explicit: Optional[str] = None) -> Optional[str]:
-    """
-    Resolve Warp auth material (Bearer token and/or Cookie string).
-
-    Sources (first match wins): explicit arg, env, local config files.
-    """
     if explicit and explicit.strip():
         return explicit.strip()
-
-    for key in (
-        "WARP_API_TOKEN",
-        "WARPDRIVE_TOKEN",
-        "WARP_TOKEN",
-        "WARP_COOKIE",
-    ):
+    for key in ("WARP_API_TOKEN", "WARPDRIVE_TOKEN", "WARP_TOKEN"):
         val = os.environ.get(key)
         if val and val.strip():
             return val.strip()
-
     for path in AUTH_PATHS:
         try:
-            if not path.exists():
+            if not path.is_file():
                 continue
-            data = json.loads(path.read_text())
-            for key in (
-                "WARP_API_TOKEN",
-                "WARPDRIVE_TOKEN",
-                "WARP_TOKEN",
-                "WARP_COOKIE",
-                "token",
-                "cookie",
-            ):
+            data = json.loads(path.read_text(encoding="utf-8"))
+            for key in ("WARP_API_TOKEN", "WARPDRIVE_TOKEN", "WARP_TOKEN", "token"):
                 val = data.get(key)
                 if val and str(val).strip():
                     return str(val).strip()
@@ -294,437 +88,411 @@ def load_token(explicit: Optional[str] = None) -> Optional[str]:
     return None
 
 
-def map_warp_status_to_tracker(
+# ---------- URLs & parsing ----------
+
+def op_url(operation_id: int, work_order_id: Optional[int] = None) -> str:
+    """Browser deep link. Prefer WO+OP path (real SPA route)."""
+    if work_order_id:
+        return (
+            f"{WARP_BASE}/shop-floor/work-order/{int(work_order_id)}"
+            f"/operation/{int(operation_id)}"
+        )
+    # Fallback only — may 404 without WO; sync fills WO ASAP
+    return f"{WARP_BASE}/ShopFloor/#/operations/{int(operation_id)}"
+
+
+def wo_url(work_order_id: int) -> str:
+    return f"{WARP_BASE}/shop-floor/work-order/{int(work_order_id)}"
+
+
+def parse_warp_input(text: str) -> dict[str, Optional[int]]:
+    """
+    Parse a pasted Warp URL or bare number into operation_id / work_order_id.
+
+    Correct browser URL shape:
+      .../shop-floor/work-order/{WO}/operation/{OP}
+    """
+    out: dict[str, Optional[int]] = {"operation_id": None, "work_order_id": None}
+    if not text or not str(text).strip():
+        return out
+    s = str(text).strip()
+
+    # .../work-order/819689/operation/8246239
+    m = re.search(
+        r"/work-?orders?/(\d+)/operations?/(\d+)", s, re.IGNORECASE
+    )
+    if m:
+        out["work_order_id"] = int(m.group(1))
+        out["operation_id"] = int(m.group(2))
+        return out
+
+    # #/work-orders/819689/operations/8246239
+    m = re.search(
+        r"work-?orders?/(\d+)/operations?/(\d+)", s, re.IGNORECASE
+    )
+    if m:
+        out["work_order_id"] = int(m.group(1))
+        out["operation_id"] = int(m.group(2))
+        return out
+
+    # .../operations/8246239  or  OP 8246239
+    m = re.search(r"/operations?/(\d+)", s, re.IGNORECASE)
+    if m:
+        out["operation_id"] = int(m.group(1))
+    m = re.search(r"\bOP[:\s#-]*(\d+)\b", s, re.IGNORECASE)
+    if m and out["operation_id"] is None:
+        out["operation_id"] = int(m.group(1))
+
+    m = re.search(r"/work-?orders?/(\d+)", s, re.IGNORECASE)
+    if m and out["work_order_id"] is None:
+        out["work_order_id"] = int(m.group(1))
+    m = re.search(r"\bWO[:\s#-]*(\d+)\b", s, re.IGNORECASE)
+    if m and out["work_order_id"] is None:
+        out["work_order_id"] = int(m.group(1))
+
+    # Bare number → Operation ID only (never invent a WO)
+    if out["operation_id"] is None and out["work_order_id"] is None:
+        if re.fullmatch(r"\d+", s):
+            n = int(s)
+            # Sequence numbers are small; real OP ids are large
+            if n >= 1000:
+                out["operation_id"] = n
+    return out
+
+
+# ---------- response helpers ----------
+
+def unwrap(data: Any) -> Any:
+    """Unwrap Warp ServiceResponse {Content: ...} envelopes."""
+    for _ in range(4):
+        if isinstance(data, dict) and data.get("Content") is not None:
+            data = data["Content"]
+            continue
+        break
+    return data
+
+
+def _fnum(v: Any) -> Optional[float]:
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _truthy(v: Any) -> bool:
+    if v is True or v == 1:
+        return True
+    if isinstance(v, str) and v.strip().lower() in {"true", "1", "yes"}:
+        return True
+    return False
+
+
+def _empty_ts(v: Any) -> bool:
+    if v is None or v == "" or v == 0:
+        return True
+    if isinstance(v, str) and v.strip().startswith(("0001-", "0000-")):
+        return True
+    return False
+
+
+def _user_name(u: Any) -> str:
+    if isinstance(u, str):
+        return u.strip()
+    if not isinstance(u, dict):
+        return ""
+    name = (
+        u.get("DisplayName")
+        or u.get("ADUsername")
+        or u.get("UserDisplayName")
+        or " ".join(filter(None, [u.get("FirstName"), u.get("LastName")])).strip()
+    )
+    return str(name).strip() if name else ""
+
+
+def ticket_open(t: dict[str, Any]) -> bool:
+    """SlimLaborTicket: IsClockedIn, ClockInTime, ClockOutTime."""
+    if _truthy(t.get("IsClockedIn")) or _truthy(t.get("ClockedInFlag")):
+        return True
+    cin = t.get("ClockInTime") or t.get("ClockIn") or t.get("ActClockIn")
+    cout = t.get("ClockOutTime") if "ClockOutTime" in t else t.get("ClockOut")
+    if "ClockOutTime" not in t and "ClockOut" not in t:
+        cout = t.get("ActClockOut")
+    return bool(cin) and _empty_ts(cout)
+
+
+def clocked_users(op: dict[str, Any], tickets: list[dict[str, Any]]) -> list[str]:
+    names: list[str] = []
+    raw = op.get("ClockedInUsers") or []
+    if isinstance(raw, dict):
+        raw = [raw]
+    for u in raw:
+        n = _user_name(u)
+        if n and n not in names:
+            names.append(n)
+    for t in tickets:
+        if not ticket_open(t):
+            continue
+        n = (
+            t.get("UserDisplayName")
+            or t.get("ADUsername")
+            or _user_name(t.get("ClockedInUser"))
+        )
+        if not n:
+            uid = t.get("UserID") or t.get("ClockedInUserID")
+            n = f"User {uid}" if uid is not None else "Clocked-in user"
+        if n not in names:
+            names.append(str(n))
+    return names
+
+
+def map_status(
     warp_status: str,
     *,
-    clocked_in: bool = False,
-    has_open_quality_calls: bool = False,
+    clocked_in: bool,
     complete_qty: Optional[float] = None,
     planned_qty: Optional[float] = None,
+    available_qty: Optional[float] = None,
 ) -> str:
     """
-    Map Warp OP state → tracker status.
-
     Priority:
-      1. Done (complete/closed, or full qty complete)
-      2. Blocked (quality calls / hold)
-      3. In Progress (clocked-in users or running status)
-      4. To Do
+      1. Cancelled → Done
+      2. Anyone clocked in → In Progress
+      3. Fully complete by qty → Done
+      4. Status complete (C) if qty not still open → Done
+      5. Blocked / running / released / blank
     """
-    status = (warp_status or "").strip().lower()
+    st = (warp_status or "").strip().lower()
 
-    if status in DONE_STATUSES:
+    if st in {"x", "cancelled", "canceled", "scrapped"}:
         return "Done"
 
-    if (
+    if clocked_in:
+        return "In Progress"
+
+    qty_done = (
         planned_qty is not None
         and complete_qty is not None
         and planned_qty > 0
         and complete_qty >= planned_qty
+    )
+    qty_open = False
+    if available_qty is not None and available_qty > 0:
+        qty_open = True
+    if (
+        planned_qty is not None
+        and complete_qty is not None
+        and planned_qty > 0
+        and complete_qty < planned_qty
     ):
+        qty_open = True
+
+    if qty_done and not qty_open:
         return "Done"
 
-    if has_open_quality_calls or status in BLOCKED_STATUSES:
+    if st in DONE:
+        return "In Progress" if qty_open else "Done"
+
+    if st in BLOCKED:
         return "Blocked"
-
-    if clocked_in or status in IN_PROGRESS_STATUSES:
+    if st in IN_PROGRESS or not st:
         return "In Progress"
-
-    if status in TODO_STATUSES or not status:
+    if st in TODO:
         return "To Do"
-
-    # Unknown Warp status: clocked-in still wins; otherwise leave as To Do
-    if clocked_in:
-        return "In Progress"
     return "To Do"
 
 
+# ---------- client ----------
+
 class WarpClient:
-    def __init__(
-        self,
-        token: Optional[str] = None,
-        base_url: str = WARP_BASE,
-        timeout: float = 20.0,
-    ):
-        self.base_url = base_url.rstrip("/")
-        self.shop_floor = f"{self.base_url}/ShopFloor"
+    def __init__(self, token: Optional[str] = None, timeout: float = 25.0):
+        self.token = load_token(token)
         self.timeout = timeout
         self.session = requests.Session()
         self.session.headers.update(
             {
                 "Accept": "application/json",
-                "User-Agent": "MM-OPs-Tracker/1.0",
+                "User-Agent": "MM-OPs-Tracker/2.0",
             }
         )
-        # bearer_token and/or cookie (browser Warp uses Cookie, not always Bearer)
-        self.token: Optional[str] = None
-        self.cookie: Optional[str] = None
-        self._apply_auth(load_token(token))
-
-    def _apply_auth(self, raw: Optional[str]) -> None:
-        self.session.headers.pop("Authorization", None)
-        self.session.headers.pop("Cookie", None)
-        bearer, cookie = normalize_auth_material(raw)
-        self.token = bearer
-        self.cookie = cookie
-        if cookie:
-            self.session.headers["Cookie"] = cookie
-        if bearer:
-            # Also send Bearer — some endpoints accept CurrentUserV4 JWT this way
-            self.session.headers["Authorization"] = f"Bearer {bearer}"
+        if self.token:
+            self.session.headers["Authorization"] = f"Bearer {self.token}"
+            self.session.headers["ApiToken"] = self.token
 
     @property
-    def is_authenticated(self) -> bool:
-        return bool(self.token or self.cookie)
+    def ok(self) -> bool:
+        return bool(self.token)
 
     def set_token(self, token: str) -> None:
-        self._apply_auth(token.strip() if token else None)
+        self.token = (token or "").strip() or None
+        if self.token:
+            self.session.headers["Authorization"] = f"Bearer {self.token}"
+            self.session.headers["ApiToken"] = self.token
+        else:
+            self.session.headers.pop("Authorization", None)
+            self.session.headers.pop("ApiToken", None)
 
     def _get(self, path: str, params: Optional[dict] = None) -> Any:
-        if not self.is_authenticated:
+        if not self.token:
             raise WarpError(
-                "No Warp auth configured. In Chrome DevTools Network → a 200 request → "
-                "Headers → Request Headers → copy the entire Cookie value "
-                "(or CurrentUserV4=eyJ...) and paste it under Warp Settings."
+                "No Warp token. Run: sx-ai-sandbox setup warp --re-auth "
+                "or paste WARP_API_TOKEN in the sidebar."
             )
-        url = f"{self.shop_floor}{path}"
+        url = f"{SHOP_FLOOR}{path}"
+        p = dict(params or {})
+        p.setdefault("ApiToken", self.token)
         try:
-            resp = self.session.get(url, params=params, timeout=self.timeout)
+            resp = self.session.get(url, params=p, timeout=self.timeout)
         except requests.RequestException as exc:
-            raise WarpError(f"Network error calling Warp: {exc}") from exc
+            raise WarpError(
+                f"Network error reaching Warp ({WARP_BASE}). "
+                f"Run this app on your Windows host (corp network), not the sandbox. "
+                f"Detail: {exc}"
+            ) from exc
 
         if resp.status_code in (401, 403):
             raise WarpError(
-                "Warp authentication failed (401/403). Cookie/token expired — "
-                "log into Warp in the browser, copy a fresh Cookie (or CurrentUserV4) "
-                "from Network → Request Headers, and paste it again in Warp Settings."
+                "Warp auth failed (401/403). Re-run: sx-ai-sandbox setup warp --re-auth"
             )
         if resp.status_code == 404:
-            raise WarpError(f"Not found in Warp: {path}")
+            raise WarpError(f"Not found (404): {path} — check the Operation ID")
         if resp.status_code >= 400:
-            body = (resp.text or "")[:300]
-            raise WarpError(f"Warp API error {resp.status_code}: {body}")
-
+            raise WarpError(f"Warp API {resp.status_code}: {(resp.text or '')[:250]}")
         if not resp.content:
             return None
         try:
-            return resp.json()
+            return unwrap(resp.json())
         except json.JSONDecodeError as exc:
             raise WarpError(f"Invalid JSON from Warp: {exc}") from exc
 
     def get_operation(self, operation_id: int) -> dict[str, Any]:
         data = self._get(f"/api/v1/operations/{int(operation_id)}")
-        return data if isinstance(data, dict) else {}
-
-    def get_work_order(self, work_order_id: int) -> dict[str, Any]:
-        data = self._get(f"/api/v1/work-orders/{int(work_order_id)}")
-        return data if isinstance(data, dict) else {}
-
-    def get_work_order_operations(
-        self, work_order_id: int, available_to_work: bool = False
-    ) -> dict[str, Any]:
-        data = self._get(
-            f"/api/v1/work-orders/{int(work_order_id)}/operations",
-            params={"availableToWork": str(available_to_work).lower()},
-        )
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict) or not data:
+            raise WarpError(f"Empty response for operation {operation_id}")
+        return data
 
     def get_labor_tickets(self, operation_id: int) -> list[dict[str, Any]]:
-        data = self._get(f"/api/v1/labor-tickets/operation/{int(operation_id)}")
+        try:
+            data = self._get(f"/api/v1/labor-tickets/operation/{int(operation_id)}")
+        except WarpError:
+            return []
         if isinstance(data, list):
-            return data
+            return [t for t in data if isinstance(t, dict)]
         if isinstance(data, dict):
-            content = data.get("Content")
-            if isinstance(content, list):
-                return content
-            # Some responses wrap a single object
-            if content is not None and not isinstance(content, list):
-                return [content] if content else []
+            for key in ("Content", "LaborTickets", "Items"):
+                if isinstance(data.get(key), list):
+                    return [t for t in data[key] if isinstance(t, dict)]
         return []
 
-    def get_work_order_by_base_id(
-        self, base_id: str, lot_id: Optional[str] = None
-    ) -> dict[str, Any]:
-        params: dict[str, str] = {"baseID": str(base_id).strip()}
-        if lot_id:
-            params["lotID"] = str(lot_id).strip()
-        data = self._get("/api/v1/work-orders", params=params)
-        return data if isinstance(data, dict) else {}
-
-    def snapshot_operation(self, operation_id: int) -> WarpOpSnapshot:
-        """Fetch OP + labor tickets and produce a tracker-ready snapshot."""
-        op = self.get_operation(int(operation_id))
-        if not op:
-            raise WarpError(f"Empty response for operation {operation_id}")
-
-        op_id = int(op.get("OperationID") or operation_id)
-        wo_id = op.get("WorkOrderID")
-        try:
-            wo_id_int = int(wo_id) if wo_id is not None else None
-        except (TypeError, ValueError):
-            wo_id_int = None
-
-        clocked_users: list[str] = []
-        for u in op.get("ClockedInUsers") or []:
-            if not isinstance(u, dict):
-                continue
-            name = (
-                u.get("DisplayName")
-                or u.get("ADUsername")
-                or " ".join(filter(None, [u.get("FirstName"), u.get("LastName")])).strip()
+    def fetch_op(self, operation_id: int) -> OpSnapshot:
+        """
+        Fetch exactly this Operation ID. Never substitutes another OP.
+        Work Order ID comes from the API response for this OP.
+        """
+        op_id = int(operation_id)
+        if op_id < 1000:
+            raise WarpError(
+                f"{op_id} looks like a sequence number, not an Operation ID. "
+                f"Use the number after /operation/ in the browser URL (usually 6+ digits)."
             )
-            if name:
-                clocked_users.append(str(name))
 
-        # Labor tickets as secondary clock-in signal
+        op = self.get_operation(op_id)
+        # Trust requested ID; still read OperationID if present
+        api_op_id = op.get("OperationID")
+        if api_op_id is not None and int(api_op_id) != op_id:
+            raise WarpError(
+                f"API returned OperationID {api_op_id} for request {op_id} — refusing to use it"
+            )
+
+        wo_raw = op.get("WorkOrderID")
         try:
-            tickets = self.get_labor_tickets(op_id)
-        except WarpError:
-            tickets = []
+            wo_id = int(wo_raw) if wo_raw is not None else None
+        except (TypeError, ValueError):
+            wo_id = None
 
-        for t in tickets:
-            if not isinstance(t, dict):
-                continue
-            if t.get("IsClockedIn"):
-                clocked_user = t.get("ClockedInUser")
-                clocked_name = (
-                    clocked_user.get("DisplayName")
-                    if isinstance(clocked_user, dict)
-                    else None
-                )
-                name = t.get("UserDisplayName") or t.get("ADUsername") or clocked_name
-                if name and name not in clocked_users:
-                    clocked_users.append(str(name))
+        tickets = self.get_labor_tickets(op_id)
+        users = clocked_users(op, tickets)
 
-        open_calls = [int(c) for c in (op.get("OpenQualityCallIDs") or []) if c is not None]
-        shop = op.get("ShopResource") or {}
-        shop_code = ""
-        if isinstance(shop, dict):
-            shop_code = (
-                shop.get("ShopResourceCode")
-                or shop.get("Code")
-                or shop.get("Name")
+        raw_status = op.get("Status")
+        if isinstance(raw_status, dict):
+            raw_status = (
+                raw_status.get("Name")
+                or raw_status.get("Value")
+                or raw_status.get("Code")
                 or ""
             )
+        warp_status = str(raw_status if raw_status is not None else "")
 
-        warp_status = str(op.get("Status") or "")
-        complete_qty = op.get("CompleteQuantity")
-        planned_qty = op.get("PlannedQuantity")
-        try:
-            complete_f = float(complete_qty) if complete_qty is not None else None
-        except (TypeError, ValueError):
-            complete_f = None
-        try:
-            planned_f = float(planned_qty) if planned_qty is not None else None
-        except (TypeError, ValueError):
-            planned_f = None
+        complete = _fnum(op.get("CompleteQuantity") or op.get("CompletedQuantity"))
+        planned = _fnum(op.get("PlannedQuantity") or op.get("DesiredQuantity"))
+        available = _fnum(op.get("AvailableQuantity"))
 
-        tracker_status = map_warp_status_to_tracker(
+        tracker = map_status(
             warp_status,
-            clocked_in=bool(clocked_users),
-            has_open_quality_calls=bool(open_calls),
-            complete_qty=complete_f,
-            planned_qty=planned_f,
+            clocked_in=bool(users),
+            complete_qty=complete,
+            planned_qty=planned,
+            available_qty=available,
         )
 
-        wo_status = ""
-        wo_base = ""
-        wo_display = ""
-        if wo_id_int:
-            try:
-                wo = self.get_work_order(wo_id_int)
-                wo_status = str(wo.get("StatusValue") or "")
-                wo_base = str(wo.get("BaseID") or "")
-                wo_display = str(wo.get("DisplayName") or "")
-                # If WO itself is closed/complete and OP wasn't marked done, still done
-                if tracker_status != "Done" and (wo_status or "").lower() in DONE_STATUSES:
-                    tracker_status = "Done"
-            except WarpError:
-                pass
-
-        actual = op.get("ActualTime")
-        try:
-            actual_f = float(actual) if actual is not None else None
-        except (TypeError, ValueError):
-            actual_f = None
-
-        seq_raw = op.get("SequenceNumber")
-        try:
-            seq_num = int(seq_raw) if seq_raw is not None else None
-        except (TypeError, ValueError):
-            seq_num = None
-
-        return WarpOpSnapshot(
+        return OpSnapshot(
             operation_id=op_id,
-            work_order_id=wo_id_int,
-            sequence_number=seq_num,
+            work_order_id=wo_id,
             title=str(op.get("Title") or ""),
             warp_status=warp_status,
-            tracker_status=tracker_status,
-            clocked_in_users=clocked_users,
-            open_quality_calls=open_calls,
-            complete_qty=complete_f,
-            planned_qty=planned_f,
-            actual_hours=actual_f,
-            shop_resource=str(shop_code),
-            display_name=wo_display,
-            work_order_status=wo_status,
-            work_order_base_id=wo_base,
-            op_url=operation_url(op_id, wo_id_int),
-            wo_url=work_order_url(wo_id_int) if wo_id_int else "",
-            raw=op,
+            tracker_status=tracker,
+            clocked_in=users,
+            complete_qty=complete,
+            planned_qty=planned,
+            available_qty=available,
+            op_url=op_url(op_id, wo_id),
+            wo_url=wo_url(wo_id) if wo_id else "",
         )
 
-    def lookup_and_snapshot(
-        self,
-        *,
-        operation_id: Optional[int] = None,
-        work_order_id: Optional[int] = None,
-        base_id: Optional[str] = None,
-        sequence: Optional[int] = None,
-    ) -> WarpOpSnapshot:
-        """
-        Resolve identifiers to an operation snapshot.
 
-        Preferred shop-floor path: BaseID (WO number) + SequenceNumber (OP number).
-        Also accepts internal WorkOrderID / OperationID when known.
-        """
-        if operation_id and not (base_id and sequence is not None):
-            # Direct OP id only when caller did not provide WO# + OP#
-            return self.snapshot_operation(int(operation_id))
-
-        wo_id = work_order_id
-        resolved_base = (str(base_id).strip() if base_id else "") or ""
-
-        if not wo_id and resolved_base:
-            wo = self.get_work_order_by_base_id(resolved_base)
-            wo_id = wo.get("WorkOrderID")
-            if not resolved_base:
-                resolved_base = str(wo.get("BaseID") or resolved_base)
-            if not wo_id:
-                raise WarpError(
-                    f"No work order found for WO number (BaseID)={resolved_base}"
-                )
-
-        if not wo_id and operation_id:
-            return self.snapshot_operation(int(operation_id))
-
-        if not wo_id:
-            raise WarpError(
-                "Enter a WO number (Base ID, e.g. 3462114) and OP number "
-                "(sequence, e.g. 62), or paste a Warp URL."
-            )
-
-        wo_ops = self.get_work_order_operations(int(wo_id), available_to_work=False)
-        if not resolved_base:
-            resolved_base = str(wo_ops.get("BaseID") or "")
-        operations = wo_ops.get("Operations") or []
-        if not operations:
-            raise WarpError(
-                f"Work order {resolved_base or wo_id} has no operations"
-            )
-
-        chosen = None
-        if sequence is not None:
-            seq_int = int(sequence)
-            for op in operations:
-                try:
-                    op_seq = int(op.get("SequenceNumber"))
-                except (TypeError, ValueError):
-                    continue
-                if op_seq == seq_int:
-                    chosen = op
-                    break
-            if chosen is None:
-                available = sorted(
-                    {
-                        int(o.get("SequenceNumber"))
-                        for o in operations
-                        if o.get("SequenceNumber") is not None
-                    },
-                    key=lambda x: x,
-                )
-                raise WarpError(
-                    f"No OP number {seq_int} on WO {resolved_base or wo_id}. "
-                    f"Available OP numbers: {available[:40]}"
-                    + ("…" if len(available) > 40 else "")
-                )
-        else:
-            # Prefer first non-complete op with clocked users, else first open, else first
-            for op in operations:
-                users = op.get("ClockedInUsers") or []
-                st = str(op.get("Status") or "").lower()
-                if users and st not in DONE_STATUSES:
-                    chosen = op
-                    break
-            if chosen is None:
-                for op in operations:
-                    st = str(op.get("Status") or "").lower()
-                    if st not in DONE_STATUSES:
-                        chosen = op
-                        break
-            if chosen is None:
-                chosen = operations[0]
-
-        op_id = chosen.get("OperationID")
-        if not op_id:
-            raise WarpError("Operation listing missing OperationID")
-        return self.snapshot_operation(int(op_id))
-
-
-def apply_snapshot_to_task(task: dict, snap: WarpOpSnapshot, *, force_status: bool = True) -> list[str]:
-    """
-    Update a tracker task dict from a Warp snapshot.
-    Returns list of human-readable change descriptions.
-    """
+def apply_snapshot(task: dict, snap: OpSnapshot, *, update_status: bool = True) -> list[str]:
+    """Write snapshot fields onto a task. Never changes operation_id to something else."""
     changes: list[str] = []
 
-    task["warp_operation_id"] = snap.operation_id
-    if snap.work_order_id:
-        task["warp_work_order_id"] = snap.work_order_id
-    if snap.work_order_base_id:
-        task["warp_base_id"] = snap.work_order_base_id
-    if snap.sequence_number is not None:
-        task["warp_sequence"] = snap.sequence_number
-    task["warp_op_url"] = snap.op_url
-    if snap.wo_url:
-        task["warp_wo_url"] = snap.wo_url
-    task["warp_status"] = snap.warp_status
-    task["warp_clocked_in"] = snap.clocked_in_users
-    task["warp_last_sync"] = __import__("datetime").datetime.now().isoformat()
+    # Guard: must stay on the same OP
+    existing = task.get("warp_operation_id")
+    if existing is not None and int(existing) != int(snap.operation_id):
+        raise WarpError(
+            f"Task is linked to OP {existing}; snapshot is OP {snap.operation_id}"
+        )
 
-    if snap.title and (not task.get("name") or task.get("name") in ("", "Unassigned")):
+    task.update(snap.to_task_fields())
+
+    if snap.title and (
+        not task.get("name")
+        or task.get("name") in ("", "Unassigned")
+        or str(task.get("name", "")).startswith("OP ")
+    ):
+        if task.get("name") != snap.title:
+            changes.append(f"name → {snap.title}")
         task["name"] = snap.title
-        changes.append(f"name → {snap.title}")
 
-    # Prefer clocked-in user as assignee when available
-    if snap.clocked_in_users:
-        primary = snap.clocked_in_users[0]
-        if task.get("assignee") in (None, "", "Unassigned") or task.get("assignee") != primary:
-            if task.get("assignee") != primary:
-                changes.append(f"assignee → {primary}")
+    if snap.clocked_in:
+        primary = snap.clocked_in[0]
+        if task.get("assignee") in (None, "", "Unassigned"):
             task["assignee"] = primary
+            changes.append(f"assignee → {primary}")
 
-    if force_status and snap.tracker_status != task.get("status"):
+    if update_status and snap.tracker_status != task.get("status"):
         old = task.get("status")
         task["status"] = snap.tracker_status
         changes.append(f"status {old} → {snap.tracker_status}")
+        if snap.tracker_status == "Done":
+            task["completed_at"] = datetime.now().isoformat()
+        elif old == "Done" and snap.tracker_status != "Done":
+            task["completed_at"] = None
 
-    # Append a sync note when something meaningful changed
     if changes:
-        from datetime import datetime
-
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-        clocked = (
-            f" clocked-in: {', '.join(snap.clocked_in_users)}"
-            if snap.clocked_in_users
-            else ""
-        )
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        clocked = f" clocked-in: {', '.join(snap.clocked_in)}" if snap.clocked_in else ""
         note = (
-            f"[{timestamp}] Warp sync {snap.label()}: "
+            f"[{ts}] Warp OP {snap.operation_id} (WO {snap.work_order_id}): "
             f"{snap.warp_status or 'n/a'} → {snap.tracker_status}{clocked}"
         )
-        existing = task.get("notes") or ""
-        task["notes"] = (existing + "\n" + note).strip()
+        task["notes"] = ((task.get("notes") or "") + "\n" + note).strip()
 
     return changes
