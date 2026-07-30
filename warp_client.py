@@ -496,3 +496,21 @@ def apply_snapshot(task: dict, snap: OpSnapshot, *, update_status: bool = True) 
         task["notes"] = ((task.get("notes") or "") + "\n" + note).strip()
 
     return changes
+
+
+# Back-compat alias (older app.py / mixed GitHub copies)
+apply_snapshot_to_task = apply_snapshot
+
+__all__ = [
+    "WarpClient",
+    "WarpError",
+    "OpSnapshot",
+    "apply_snapshot",
+    "apply_snapshot_to_task",
+    "load_token",
+    "op_url",
+    "wo_url",
+    "parse_warp_input",
+    "map_status",
+    "WARP_BASE",
+]
