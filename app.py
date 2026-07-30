@@ -16,15 +16,33 @@ from datetime import date, datetime, timedelta
 import pandas as pd
 import streamlit as st
 
-from warp_client import (
-    WarpClient,
-    WarpError,
-    apply_snapshot,
-    load_token,
-    op_url,
-    parse_warp_input,
-    wo_url,
-)
+# Import Warp helpers with clear errors (Streamlit Cloud often has mismatched files)
+try:
+    import warp_client as _wc
+except ImportError as exc:
+    raise ImportError(
+        "Cannot import warp_client.py — put it in the same folder as app.py on GitHub."
+    ) from exc
+
+try:
+    from warp_client import WarpClient, WarpError, load_token, op_url, parse_warp_input, wo_url
+except ImportError as exc:
+    raise ImportError(
+        f"warp_client.py is missing required exports. Available: "
+        f"{[n for n in dir(_wc) if not n.startswith('_')]}. Detail: {exc}"
+    ) from exc
+
+# New name + old name (apply_snapshot_to_task) so mixed deploys still work
+if hasattr(_wc, "apply_snapshot"):
+    apply_snapshot = _wc.apply_snapshot
+elif hasattr(_wc, "apply_snapshot_to_task"):
+    apply_snapshot = _wc.apply_snapshot_to_task
+else:
+    raise ImportError(
+        "warp_client.py must define apply_snapshot (or apply_snapshot_to_task). "
+        f"Available: {[n for n in dir(_wc) if not n.startswith('_')]}. "
+        "Push the latest warp_client.py from the working local project."
+    )
 
 TASKS_FILE = "team_tasks.json"
 STATUSES = ["To Do", "In Progress", "Done", "Blocked"]
@@ -142,7 +160,7 @@ def render_op_table(rows: list[dict]) -> None:
     styled = df.style.map(color_status, subset=["Status"]) if "Status" in df.columns else df
     st.dataframe(
         styled,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "Open": st.column_config.LinkColumn("Open in Warp", display_text="Open ↗"),
@@ -215,7 +233,7 @@ st.sidebar.caption(
     "Warp will not resolve inside the Grok sandbox."
 )
 
-if st.sidebar.button("🔄 Sync all linked OPs", type="primary", use_container_width=True):
+if st.sidebar.button("🔄 Sync all linked OPs", type="primary", width="stretch"):
     if not client.ok:
         st.sidebar.error("Add a Warp token first")
     else:
@@ -308,7 +326,7 @@ with tab_activity:
     with col_sync:
         st.write("")  # spacing
         st.write("")
-        if st.button("🔄 Refresh from Warp", use_container_width=True, disabled=not client.ok):
+        if st.button("🔄 Refresh from Warp", width="stretch", disabled=not client.ok):
             msgs = []
             for t in tasks:
                 if not t.get("warp_operation_id") or not t.get("warp_auto_sync", True):
@@ -484,7 +502,7 @@ with tab_edit:
 
             b1, b2, b3 = st.columns(3)
             with b1:
-                if st.button("Save link", use_container_width=True):
+                if st.button("Save link", width="stretch"):
                     parsed = parse_warp_input(paste) if paste.strip() else {}
                     op_id = None
                     wo_id = None
@@ -520,7 +538,7 @@ with tab_edit:
             with b2:
                 if st.button(
                     "Sync from Warp",
-                    use_container_width=True,
+                    width="stretch",
                     disabled=not client.ok or not task.get("warp_operation_id"),
                 ):
                     changed, msg = sync_one(task, client)
@@ -531,7 +549,7 @@ with tab_edit:
                         st.info(msg)
                     st.rerun()
             with b3:
-                if st.button("Remove task", use_container_width=True):
+                if st.button("Remove task", width="stretch"):
                     tasks[:] = [t for t in tasks if t["id"] != task["id"]]
                     save_tasks(tasks)
                     st.rerun()
@@ -554,7 +572,7 @@ with tab_add:
             help="Must be the Operation ID, not sequence 10/20/101",
         )
         pull = st.checkbox("Fetch title & status from Warp now", value=True)
-        submitted = st.form_submit_button("Add", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("Add", type="primary", width="stretch")
 
         if submitted:
             parsed = parse_warp_input(paste) if paste.strip() else {}
